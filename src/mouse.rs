@@ -12,7 +12,10 @@ use std::{
 use windows::{
     Win32::{
         Foundation::*,
-        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+        System::{
+            LibraryLoader::GetModuleHandleW,
+            Threading::{GetCurrentProcessId, GetCurrentThreadId},
+        },
         UI::{Accessibility::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
     },
     core::Result,
@@ -118,7 +121,7 @@ impl MiddleMouse {
                 Some(foreground_proc),
                 0,
                 0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                WINEVENT_OUTOFCONTEXT,
             );
             // A low-frequency fallback also handles unusual focus notifications.
             let heartbeat = SetTimer(None, 0, 250, None);
@@ -239,6 +242,22 @@ impl State {
                 desktop::remember(HWND(w.hwnd as _));
             }
             self.exe = w.exe;
+        } else {
+            // Manual access to frun's tray/settings is its own foreground
+            // context; do not retain the excluded game as the active app.
+            unsafe {
+                let hwnd = GetForegroundWindow();
+                let mut pid = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                if !hwnd.is_invalid() && pid == GetCurrentProcessId() {
+                    if self.foreground != hwnd.0 as isize {
+                        self.hold.cancel();
+                        self.stop_timer();
+                    }
+                    self.foreground = hwnd.0 as isize;
+                    self.exe.clear();
+                }
+            }
         }
         let blocked = self.settings.blocked(&self.exe);
         let wanted = if blocked { None } else { self.settings.hotkey };
@@ -442,9 +461,11 @@ mod tests {
         let mut settings = Settings::from_config(&cfg, false, false);
         assert!(settings.blocked(r"D:\Games\CS2.exe"));
         assert!(!settings.blocked("chrome.exe"));
+        assert!(!settings.blocked(""));
         settings.paused = true;
         assert!(settings.blocked("chrome.exe"));
         assert!(settings.blocked("cs2.exe"));
+        assert!(settings.blocked(""));
     }
 
     #[test]
