@@ -1393,6 +1393,13 @@ impl App {
         self.settings_offset = if self.set_sel < start { self.set_sel } else if self.set_sel >= start + cap { self.set_sel + 1 - cap } else { start };
     }
     pub fn wake_status(&self) -> mouse::Status { self.mouse.as_ref().map(|m| m.status()).unwrap_or_default() }
+    fn wake_allowed(&self) -> bool {
+        if self.wake_paused || unsafe { GetForegroundWindow().is_invalid() } { return false; }
+        // Recheck at dispatch as well: focus may change after the service queued
+        // a trigger but before the UI thread processes it.
+        desktop::foreground().map_or_else(|| self.wake_status().excluded.is_empty(),
+            |w| !gesture::excluded(&w.exe, &self.cfg.excluded_apps))
+    }
     pub fn toggle_pause(&mut self) {
         self.wake_paused = !self.wake_paused;
         self.cancel_recording();
@@ -2258,10 +2265,10 @@ impl App {
         let point = || ((lp.0 as i16) as f32 / k, ((lp.0 >> 16) as i16) as f32 / k);
         match msg {
             mouse::WM_WAKE_KEY => {
-                if !self.wake_paused && self.wake_status().excluded.is_empty() { self.toggle(); }
+                if self.wake_allowed() { self.toggle(); }
             }
             mouse::WM_MIDDLE_CLICK => {
-                if !self.wake_paused && self.cfg.middle_mouse && self.wake_status().excluded.is_empty() {
+                if self.cfg.middle_mouse && self.wake_allowed() {
                     if self.menu.is_open() { self.close_menu(false); }
                     if self.visible { self.hide(); } else {
                         self.show_at(Some(POINT { x: wp.0 as u32 as i32, y: lp.0 as i32 }));

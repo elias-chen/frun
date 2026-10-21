@@ -331,6 +331,12 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
         if data.flags & LLMHF_INJECTED == 0 {
             let mut consumed = false;
             with_state(|s| {
+                // Foreground notifications are asynchronous. Cancel before a
+                // movement can turn a pending press into a replayed native drag.
+                if s.hold.pending() && unsafe { GetForegroundWindow().0 as isize != s.press_window }
+                {
+                    s.hold.cancel();
+                }
                 let point = Point {
                     x: data.pt.x,
                     y: data.pt.y,

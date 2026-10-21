@@ -125,6 +125,7 @@ mod tests {
         let mut h = Hold::default();
         h.down(true, Point::default(), 0);
         h.cancel();
+        assert_eq!(h.moved(Point { x: 100, y: 100 }), Action::Pass);
         assert_eq!(h.tick(true, 500, 400), Action::Pass);
         assert_eq!(h.up(), Action::Consume);
         h.down(true, Point::default(), 0);
