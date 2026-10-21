@@ -4,6 +4,8 @@ mod app;
 mod config;
 mod doctor;
 mod gfx;
+mod gesture;
+mod desktop;
 mod grid;
 mod i18n;
 mod index;
@@ -30,7 +32,7 @@ fn main() {
     } else if args.first().is_some_and(|a| a == "--update") {
         update::run(&args[1..]);
     } else if args.first().is_some_and(|a| a == "--pick") {
-        pick(args.get(1).and_then(|a| a.parse::<isize>().ok()).unwrap_or(0));
+        pick(args.get(1).and_then(|a| a.parse::<isize>().ok()).unwrap_or(0), args.get(2).is_some_and(|a| a == "exe"));
     } else {
         let updated = (args.first().is_some_and(|a| a == "--updated")).then(|| args.get(1).cloned()).flatten();
         let _ = app::run(updated);
@@ -38,12 +40,13 @@ fn main() {
 }
 
 /// `frun --pick <hwnd>`：打开文件夹选择框，把选中的路径写到标准输出。
-fn pick(owner: isize) {
+fn pick(owner: isize, executable: bool) {
     use windows::Win32::{Foundation::HWND, System::Com::*};
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
-    if let Some(path) = platform::pick_folder(HWND(owner as _)) {
+    let path = if executable { platform::pick_executable(HWND(owner as _)) } else { platform::pick_folder(HWND(owner as _)) };
+    if let Some(path) = path {
         print!("{path}");
     }
 }

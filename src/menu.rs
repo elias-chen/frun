@@ -22,6 +22,8 @@ const ITEM: f32 = 36.0;
 enum Cmd {
     Settings,
     Reindex,
+    Pause,
+    New,
     Quit,
     Open,
     Admin,
@@ -61,6 +63,7 @@ impl App {
         self.hide();
         let items = vec![
             (self.s.tray_settings.clone(), "Ctrl ,", Cmd::Settings),
+            (if self.wake_paused { self.s.resume_wake.clone() } else { self.s.pause_wake.clone() }, "", Cmd::Pause),
             (self.s.tray_reindex.clone(), "Ctrl R", Cmd::Reindex),
             (self.s.tray_quit.clone(), "", Cmd::Quit),
         ];
@@ -86,6 +89,7 @@ impl App {
         }
         // 路径模式里列的是磁盘上的东西，不是索引里的程序：没有"不再显示"
         if !path {
+            items.push((self.s.menu_new.clone(), "", Cmd::New));
             items.push((if self.is_pinned(i) { self.s.menu_unpin.clone() } else { self.s.menu_pin.clone() }, "Ctrl P", Cmd::Pin));
             items.push((self.s.menu_hide.clone(), "Ctrl Del", Cmd::Hide));
         }
@@ -219,6 +223,8 @@ impl App {
         match cmd {
             Cmd::Settings => self.show_settings(),
             Cmd::Reindex => self.rebuild_index(),
+            Cmd::Pause => self.toggle_pause(),
+            Cmd::New => self.launch_new(row),
             // 这里正借着应用状态：DestroyWindow 会同步派发 WM_DESTROY，重入时借不到，
             // 退出就丢了，进程带着单实例锁留下来。所以直接收尾。
             Cmd::Quit => {

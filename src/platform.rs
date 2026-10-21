@@ -112,12 +112,14 @@ pub fn set_autostart(on: bool) {
 
 /// 面板要出现的显示器：工作区和缩放比例。
 pub fn monitor(primary: bool) -> (RECT, f32) {
+    let mut pt = POINT::default();
+    if !primary { unsafe { let _ = GetCursorPos(&mut pt); } }
+    monitor_at(pt)
+}
+
+pub fn monitor_at(pt: POINT) -> (RECT, f32) {
     unsafe {
-        let mut pt = POINT::default();
-        if !primary {
-            let _ = GetCursorPos(&mut pt);
-        }
-        let mon = MonitorFromPoint(pt, if primary { MONITOR_DEFAULTTOPRIMARY } else { MONITOR_DEFAULTTONEAREST });
+        let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(mon, &mut mi);
         let (mut dx, mut dy) = (96u32, 96u32);
@@ -295,10 +297,12 @@ fn skipped(root: &str, name: &str) -> bool {
 ///
 /// 选择框会把资源管理器的一大堆组件载入所在进程（上百 MB、几十个线程，且不再释放），
 /// 所以和扫描一样放在用完即退的子进程里。
-pub fn spawn_pick(hwnd: HWND) -> bool {
+pub fn spawn_pick(hwnd: HWND) -> bool { spawn_picker(hwnd, false) }
+pub fn spawn_pick_exe(hwnd: HWND) -> bool { spawn_picker(hwnd, true) }
+fn spawn_picker(hwnd: HWND, executable: bool) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     let raw = hwnd.0 as isize;
-    let Ok(child) = Command::new(exe).arg("--pick").arg(raw.to_string()).stdout(std::process::Stdio::piped()).spawn()
+    let Ok(child) = Command::new(exe).arg("--pick").arg(raw.to_string()).arg(if executable { "exe" } else { "folder" }).stdout(std::process::Stdio::piped()).spawn()
     else {
         return false;
     };
@@ -310,7 +314,7 @@ pub fn spawn_pick(hwnd: HWND) -> bool {
             .filter(|p| !p.is_empty());
         let boxed = Box::into_raw(Box::new(path));
         unsafe {
-            let _ = PostMessageW(Some(HWND(raw as _)), WM_PICKED, WPARAM(0), LPARAM(boxed as isize));
+            let _ = PostMessageW(Some(HWND(raw as _)), WM_PICKED, WPARAM(executable as usize), LPARAM(boxed as isize));
         }
     });
     true
@@ -425,4 +429,36 @@ pub fn tray_icon() -> HICON {
             .map(|h| HICON(h.0))
             .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
     }
+}
+
+
+pub fn pick_executable(owner: HWND) -> Option<String> {
+    unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let opts = dialog.GetOptions().ok()?;
+        dialog.SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST).ok()?;
+        dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC { pszName: w!("Programs (*.exe)"), pszSpec: w!("*.exe") }]).ok()?;
+        dialog.Show(Some(owner)).ok()?;
+        let path = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let result = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as _));
+        result
+    }
+}
+
+/// A distinct pause icon, with native alpha and mask (no extra bitmap asset).
+pub fn paused_tray_icon() -> HICON {
+    let mut pixels = vec![0u8; 32 * 32 * 4];
+    let mut mask = [255u8; 128];
+    for y in 0..32usize { for x in 0..32usize {
+        let dx = x as i32 - 16;
+        let dy = y as i32 - 16;
+        if dx * dx + dy * dy <= 225 {
+            mask[y * 4 + x / 8] &= !(0x80 >> (x % 8));
+            let pause = (10..23).contains(&y) && ((10..14).contains(&x) || (18..22).contains(&x));
+            let color = if pause { [255, 255, 255, 255] } else { [30, 155, 235, 255] };
+            pixels[(y * 32 + x) * 4..(y * 32 + x + 1) * 4].copy_from_slice(&color);
+        }
+    } }
+    unsafe { CreateIcon(None, 32, 32, 1, 32, mask.as_ptr(), pixels.as_ptr()).unwrap_or_else(|_| tray_icon()) }
 }

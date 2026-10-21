@@ -20,6 +20,8 @@ strings!(
     err_missing, err_failed, tray_settings, tray_quit, add_dir, hidden, hidden_flash,
     tray_reindex, admin, menu_open, menu_folder, menu_hide, menu_exclude, auto_dir, auto_update, updated_to,
     middle_mouse, mouse_failed, pinned_programs, pin_hint, menu_pin, menu_unpin,
+    tab_wake, pause_wake, resume_wake, wake_paused, wake_auto_paused, hold_delay, reuse_windows,
+    exclude_file, exclude_running, running_back, back, add_app, menu_new, err_activate,
 );
 
 const ZH: &str = include_str!("../locales/zh-CN.toml");
