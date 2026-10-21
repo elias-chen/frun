@@ -20,6 +20,7 @@ Desktop.ini
 /design/
 /docs/*
 !/docs/media/
+!/docs/launcher-preview.md
 /AGENTS.md
 /CLAUDE.md
 

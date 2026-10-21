@@ -21,6 +21,10 @@ pub struct Config {
     pub language: String,
     /// Ctrl / Alt / Shift / Win 加一个键，如 "Ctrl+Alt+K"
     pub hotkey: String,
+    /// 鼠标中键单击呼出；启用时占用中键的原有操作。
+    pub middle_mouse: bool,
+    /// 固定软件的启动目标，顺序与首页一致。
+    pub pins: Vec<String>,
     pub ime_english: bool,
     /// "system" / "light" / "dark"
     pub theme: String,
@@ -54,6 +58,8 @@ impl Default for Config {
         Self {
             language: String::new(),
             hotkey: "Alt+Space".into(),
+            middle_mouse: true,
+            pins: Vec::new(),
             ime_english: true,
             theme: "system".into(),
             corners: "round".into(),
@@ -81,6 +87,8 @@ impl Config {
         self.max_rows = self.max_rows.clamp(ROWS_MIN, ROWS_MAX);
         self.cx = self.cx.clamp(0.0, 1.0);
         self.ty = self.ty.clamp(0.0, 1.0);
+        let mut seen = HashSet::new();
+        self.pins.retain(|p| !p.is_empty() && seen.insert(p.to_lowercase()));
         self
     }
 }
@@ -243,5 +251,18 @@ mod tests {
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.hotkey, "Alt+Space");
         assert_eq!(back.exts, ["exe", "lnk", "bat", "cmd"]);
+    }
+
+    #[test]
+    fn legacy_settings_load_and_pin_order_survives_restart() {
+        let legacy: Config = toml::from_str("hotkey = 'Ctrl+Alt+K'").unwrap();
+        assert_eq!(legacy.hotkey, "Ctrl+Alt+K");
+        assert!(legacy.middle_mouse);
+        assert!(legacy.pins.is_empty());
+        let text = "middle_mouse = false\npins = ['D:\\Tools\\B.exe', '', 'd:\\tools\\b.exe', 'shell:AppsFolder\\a!App']";
+        let cfg = toml::from_str::<Config>(text).unwrap().sanitize();
+        let back = toml::from_str::<Config>(&toml::to_string(&cfg).unwrap()).unwrap().sanitize();
+        assert!(!back.middle_mouse);
+        assert_eq!(back.pins, [r"D:\Tools\B.exe", r"shell:AppsFolder\a!App"]);
     }
 }

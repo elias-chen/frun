@@ -2,8 +2,10 @@
 use crate::{
     config::{self, Config, Store},
     gfx::{Color, Gfx},
+    grid,
     i18n::{self, Strings},
     index::{self, Index, Kind},
+    mouse::{self, MiddleMouse},
     paths,
     platform::*,
     scan::{self, WM_ICONS, WM_INDEX, WM_PROGRESS},
@@ -192,6 +194,7 @@ pub enum Mode {
 pub enum SRow {
     Lang,
     Hotkey,
+    MiddleMouse,
     Ime,
     Autostart,
     Admin,
@@ -218,6 +221,7 @@ pub enum Act {
     Bar,
     QueryField,
     Row(usize),
+    PinPage(i32),
     OpenSettings,
     Back,
     Tab(usize),
@@ -309,6 +313,8 @@ pub struct App {
     pub query: TextField,
     pub rows: Vec<Row>,
     pub sel: usize,
+    pub pin_page: usize,
+    pub pin_total: usize,
     expanded: Option<usize>,
     /// 路径模式下这一层列出的文件夹和程序；`paths` 是同样内容做成的分组，给结果行用
     pub path_items: Vec<paths::Item>,
@@ -356,6 +362,7 @@ pub struct App {
 
     drag: Option<Drag>,
     watchers: Watchers,
+    mouse: Option<MiddleMouse>,
     /// 已经下载好的新版本：(版本号, 文件)，面板收起时换上
     update_ready: Option<(String, std::path::PathBuf)>,
     /// 刚换上的新版本号：下次呼出时提示一次
@@ -429,6 +436,14 @@ pub fn run(updated: Option<String>) -> Result<()> {
             config::save(&cfg);
         }
         let store = Store::load();
+        let mouse = match MiddleMouse::start(hwnd, cfg.middle_mouse) {
+            Ok(trigger) => Some(trigger),
+            Err(e) => {
+                scan::log(&format!("middle mouse unavailable: {e}"));
+                cfg.middle_mouse = false;
+                None
+            }
+        };
         let theme = Theme::new(true);
         let mut app = App {
             hwnd,
@@ -449,6 +464,8 @@ pub fn run(updated: Option<String>) -> Result<()> {
             query: TextField::default(),
             rows: Vec::new(),
             sel: 0,
+            pin_page: 0,
+            pin_total: 0,
             expanded: None,
             path_items: Vec::new(),
             paths: Vec::new(),
@@ -485,6 +502,7 @@ pub fn run(updated: Option<String>) -> Result<()> {
             pulse: Instant::now(),
             drag: None,
             watchers: Watchers::default(),
+            mouse,
             update_ready: None,
             just_updated: None,
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -550,6 +568,9 @@ impl App {
     }
 
     fn target_h(&self) -> f32 {
+        if self.pin_grid() {
+            return BAR + grid::HEADER + self.rows.len().div_ceil(grid::COLUMNS) as f32 * grid::CELL + PAD;
+        }
         let rows = match self.mode {
             Mode::Settings => self.srows().len(),
             Mode::Search if self.rows.is_empty() => self.note().is_some() as usize,
@@ -567,7 +588,7 @@ impl App {
         let x = self.work.left + (self.cfg.cx * sw).round() as i32 - w / 2;
         let y = self.work.top + (self.cfg.ty * sh).round() as i32;
         let x = x.clamp(self.work.left, (self.work.right - w).max(self.work.left));
-        let y = y.clamp(self.work.top, (self.work.bottom - (BAR * k) as i32).max(self.work.top));
+        let y = y.clamp(self.work.top, (self.work.bottom - h).max(self.work.top));
         let flags = SWP_NOACTIVATE | if show { SWP_SHOWWINDOW } else { SWP_NOZORDER };
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, flags);
@@ -583,6 +604,8 @@ impl App {
         self.refresh_theme();
         self.mode = Mode::Search;
         self.query.clear();
+        self.pin_page = 0;
+        self.sel = 0;
         self.expanded = None;
         self.error = None;
         self.auto_rescanned = false;
@@ -905,6 +928,17 @@ impl App {
         }
         self.path_items.clear();
         self.paths.clear();
+        let pins = self.index.pinned(&self.cfg.pins);
+        self.pin_total = pins.len();
+        if q.trim().is_empty() && !pins.is_empty() {
+            let size = self.pin_page_size();
+            self.pin_page = self.pin_page.min(grid::pages(pins.len(), size) - 1);
+            self.rows = pins[grid::page(pins.len(), size, self.pin_page)].iter().map(|&(group, member)| Row {
+                group, member, variant: false, current: false, stack: 0, marks: Vec::new(), path: false,
+            }).collect();
+            self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+            return;
+        }
         let mut rows = Vec::new();
         let typed: Vec<char> = q.trim().to_lowercase().chars().collect();
         for hit in search::run(&self.index, &self.store, &q, max) {
@@ -954,6 +988,55 @@ impl App {
         if self.rows.is_empty() && !q.trim().is_empty() && !self.auto_rescanned && self.visible {
             self.auto_rescanned = true;
             self.scan(Scan::Auto, false);
+        }
+    }
+
+    pub fn pin_grid(&self) -> bool {
+        self.mode == Mode::Search && self.pin_total > 0 && self.query.string().trim().is_empty()
+    }
+
+    pub fn pin_page_size(&self) -> usize {
+        let height = (self.work.bottom - self.work.top) as f32 * 0.85 / self.k();
+        grid::page_size(height - BAR - PAD)
+    }
+
+    pub fn pin_pages(&self) -> usize {
+        grid::pages(self.pin_total, self.pin_page_size())
+    }
+
+    fn change_pin_page(&mut self, step: i32) {
+        if !self.pin_grid() { return; }
+        self.pin_page = (self.pin_page as i32 + step).clamp(0, self.pin_pages() as i32 - 1) as usize;
+        self.sel = 0;
+        self.requery();
+    }
+
+    pub fn is_pinned(&self, row: usize) -> bool {
+        self.rows.get(row).filter(|r| !r.path).is_some_and(|r| {
+            self.index.groups[r.group].members.iter().any(|m| self.cfg.pins.iter().any(|p| p.eq_ignore_ascii_case(&m.target)))
+        })
+    }
+
+    pub fn toggle_pin(&mut self, i: usize) {
+        let Some(row) = self.rows.get(i).filter(|r| !r.path) else { return };
+        let group = &self.index.groups[row.group];
+        if self.is_pinned(i) {
+            self.cfg.pins.retain(|p| !group.members.iter().any(|m| p.eq_ignore_ascii_case(&m.target)));
+        } else {
+            self.cfg.pins.push(group.members[row.member].target.clone());
+        }
+        self.changed();
+        self.requery();
+    }
+
+    /// Anchor keyboard context menus to the selected tile or search row.
+    pub fn row_anchor(&self, i: usize) -> (f32, f32) {
+        if self.pin_grid() {
+            let cell_w = (self.width() - 2.0 * PAD) / grid::COLUMNS as f32;
+            (PAD + (i % grid::COLUMNS) as f32 * cell_w + 16.0,
+             BAR + grid::HEADER + (i / grid::COLUMNS) as f32 * grid::CELL + 60.0)
+        } else {
+            (60.0, BAR + (i as f32 + 0.8) * ROW)
         }
     }
 
@@ -1226,7 +1309,7 @@ impl App {
 
     pub fn srows(&self) -> Vec<SRow> {
         match self.tab {
-            0 => vec![SRow::Lang, SRow::Hotkey, SRow::Ime, SRow::Autostart, SRow::Admin, SRow::Update],
+            0 => vec![SRow::Lang, SRow::Hotkey, SRow::MiddleMouse, SRow::Ime, SRow::Autostart, SRow::Admin, SRow::Update],
             1 => vec![SRow::Theme, SRow::Corners, SRow::Size, SRow::MaxRows, SRow::Position, SRow::Screen, SRow::Reduce],
             _ => {
                 let mut rows: Vec<SRow> =
@@ -1319,6 +1402,7 @@ impl App {
 
     pub fn switch_value(&self, row: SRow) -> bool {
         match row {
+            SRow::MiddleMouse => self.cfg.middle_mouse,
             SRow::Ime => self.cfg.ime_english,
             SRow::Autostart => autostart(),
             SRow::Admin => self.cfg.admin,
@@ -1330,6 +1414,22 @@ impl App {
 
     fn set_switch(&mut self, row: SRow, on: bool) {
         match row {
+            SRow::MiddleMouse => {
+                if on && self.mouse.is_none() {
+                    match MiddleMouse::start(self.hwnd, false) {
+                        Ok(trigger) => self.mouse = Some(trigger),
+                        Err(e) => {
+                            scan::log(&format!("middle mouse unavailable: {e}"));
+                            self.flash = self.s.mouse_failed.clone();
+                            self.flash_until = Some(Instant::now() + FLASH);
+                            self.invalidate();
+                            return;
+                        }
+                    }
+                }
+                self.cfg.middle_mouse = on;
+                if let Some(trigger) = &self.mouse { trigger.set_enabled(on); }
+            }
             SRow::Ime => self.cfg.ime_english = on,
             SRow::Autostart => set_autostart(on),
             SRow::Admin => self.cfg.admin = on,
@@ -1617,7 +1717,7 @@ impl App {
                 let v = (self.seg_value(row) as i32 + d).clamp(0, n - 1) as usize;
                 self.set_seg(row, v);
             }
-            SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, d > 0),
+            SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, d > 0),
             SRow::Size => self.set_scale((self.cfg.scale as i32 + d * 5) as u32),
             SRow::Hidden => self.hidden_open = d > 0,
             SRow::MaxRows => self.step_rows(d),
@@ -1629,7 +1729,7 @@ impl App {
     fn activate(&mut self) {
         let Some(row) = self.srow() else { return };
         match row {
-            SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, !self.switch_value(row)),
+            SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, !self.switch_value(row)),
             SRow::Hotkey | SRow::Position => self.press_button(row),
             SRow::Status => self.scan(Scan::Manual, true),
             SRow::Hidden => self.hidden_open = !self.hidden_open,
@@ -1677,6 +1777,23 @@ impl App {
 
     fn key_search(&mut self, vk: u32, ctrl: bool, alt: bool, shift: bool, repeat: bool) -> bool {
         let is = |k: VIRTUAL_KEY| vk == k.0 as u32;
+        if ctrl && vk == b'P' as u32 {
+            if !repeat { self.toggle_pin(self.sel); }
+            return true;
+        }
+        if self.pin_grid() && !ctrl && !alt && !shift {
+            if is(VK_PRIOR) || is(VK_NEXT) {
+                self.change_pin_page(if is(VK_PRIOR) { -1 } else { 1 });
+                return true;
+            }
+            let step = if is(VK_LEFT) { -1 } else if is(VK_RIGHT) { 1 }
+                else if is(VK_UP) { -(grid::COLUMNS as i32) } else if is(VK_DOWN) { grid::COLUMNS as i32 }
+                else { 0 };
+            if step != 0 {
+                self.sel = (self.sel as i32 + step).clamp(0, self.rows.len().saturating_sub(1) as i32) as usize;
+                return true;
+            }
+        }
         if (ctrl || alt) && (b'1' as u32..=b'8' as u32).contains(&vk) {
             self.launch((vk - b'1' as u32) as usize, false);
             return true;
@@ -1960,6 +2077,7 @@ impl App {
                 }
             }
             Act::Row(i) => self.launch(i, false),
+            Act::PinPage(step) => self.change_pin_page(step),
             Act::OpenSettings => self.open_settings(),
             Act::Back => self.close_settings(),
             Act::Tab(i) => self.set_tab(i),
@@ -2017,6 +2135,14 @@ impl App {
         let point = || ((lp.0 as i16) as f32 / k, ((lp.0 >> 16) as i16) as f32 / k);
         match msg {
             WM_HOTKEY => self.toggle(),
+            mouse::WM_MIDDLE_CLICK => {
+                if self.menu.is_open() {
+                    self.close_menu(false);
+                    self.hide();
+                } else {
+                    self.toggle();
+                }
+            }
             WM_SUMMON => self.show(),
             WM_TRAY => match lp.0 as u32 & 0xFFFF {
                 WM_LBUTTONUP => self.toggle(),
@@ -2136,7 +2262,8 @@ impl App {
                 }
             }
             WM_MOUSEWHEEL if self.mode == Mode::Search => {
-                self.move_sel(if (wp.0 >> 16) as i16 > 0 { -1 } else { 1 }, false);
+                let step = if (wp.0 >> 16) as i16 > 0 { -1 } else { 1 };
+                if self.pin_grid() { self.change_pin_page(step); } else { self.move_sel(step, false); }
                 self.invalidate();
             }
             WM_SETCURSOR if lp.0 as u32 & 0xFFFF == HTCLIENT => unsafe {

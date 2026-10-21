@@ -27,6 +27,7 @@ enum Cmd {
     Admin,
     Folder,
     Hide,
+    Pin,
     Exclude,
 }
 
@@ -85,6 +86,7 @@ impl App {
         }
         // 路径模式里列的是磁盘上的东西，不是索引里的程序：没有"不再显示"
         if !path {
+            items.push((if self.is_pinned(i) { self.s.menu_unpin.clone() } else { self.s.menu_pin.clone() }, "Ctrl P", Cmd::Pin));
             items.push((self.s.menu_hide.clone(), "Ctrl Del", Cmd::Hide));
         }
         if !path && excludable(entry).is_some() {
@@ -97,7 +99,8 @@ impl App {
                 let _ = GetWindowRect(self.hwnd, &mut rc);
             }
             let k = self.k();
-            POINT { x: rc.left + (60.0 * k) as i32, y: rc.top + ((BAR + (i as f32 + 0.8) * ROW) * k) as i32 }
+            let (x, y) = self.row_anchor(i);
+            POINT { x: rc.left + (x * k) as i32, y: rc.top + (y * k) as i32 }
         });
         let (work, dpi) = (self.work, self.dpi);
         self.popup(items, Some(i), at, false, work, dpi);
@@ -183,7 +186,7 @@ impl App {
     }
 
     /// 收起菜单。`back` 为真时把焦点还给面板（结果行的菜单）。
-    fn close_menu(&mut self, back: bool) {
+    pub(crate) fn close_menu(&mut self, back: bool) {
         if !self.menu.open {
             return;
         }
@@ -225,6 +228,7 @@ impl App {
             Cmd::Open => self.launch(row, false),
             Cmd::Admin => self.launch(row, true),
             Cmd::Folder => self.reveal(row),
+            Cmd::Pin => self.toggle_pin(row),
             Cmd::Hide => {
                 self.sel = row;
                 self.hide_selected();

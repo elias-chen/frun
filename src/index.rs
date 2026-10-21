@@ -133,6 +133,18 @@ pub struct Index {
 }
 
 impl Index {
+    /// Resolve saved targets on each reload: index order and usage preferences
+    /// may change, but pin order and the chosen launch target must not.
+    pub fn pinned(&self, targets: &[String]) -> Vec<(usize, usize)> {
+        let mut seen = HashSet::new();
+        targets.iter().filter_map(|target| {
+            let (group, member) = self.groups.iter().enumerate().find_map(|(gi, g)| {
+                g.members.iter().position(|e| e.target.eq_ignore_ascii_case(target)).map(|mi| (gi, mi))
+            })?;
+            seen.insert(group).then_some((group, member))
+        }).collect()
+    }
+
     pub fn targets(&self) -> HashSet<String> {
         self.groups.iter().flat_map(|g| g.members.iter().map(|m| m.target.clone())).collect()
     }
@@ -351,6 +363,23 @@ mod tests {
             resolved: resolved.into(),
             owner: String::new(),
             console: false,
+        }
+    }
+
+    #[test]
+    fn pins_keep_order_and_exact_target_across_index_rebuilds() {
+        let entries = vec![
+            entry("Editor", r"D:\Portable\Editor.exe", Kind::Dir, "editor"),
+            entry("Editor", r"shell:AppsFolder\editor", Kind::Start, "editor"),
+            entry("Terminal", r"shell:AppsFolder\terminal!App", Kind::Store, ""),
+        ];
+        let pins = vec!["missing".into(), r"SHELL:APPSFOLDER\TERMINAL!APP".into(),
+            r"shell:AppsFolder\editor".into(), r"D:\Portable\Editor.exe".into()];
+        for list in [entries.clone(), entries.into_iter().rev().collect()] {
+            let mut ix = Index { groups: group(list.into_iter()), found: Vec::new() };
+            ix.choose_all(&Store::default());
+            let targets: Vec<_> = ix.pinned(&pins).into_iter().map(|(g, m)| ix.groups[g].members[m].target.as_str()).collect();
+            assert_eq!(targets, [r"shell:AppsFolder\terminal!App", r"shell:AppsFolder\editor"]);
         }
     }
 

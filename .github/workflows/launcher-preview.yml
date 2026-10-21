@@ -1,0 +1,32 @@
+name: launcher-preview
+
+on:
+  push:
+    branches: ['feat/middle-mouse-pins']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update
+      - run: cargo check --locked --tests
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package preview
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory preview | Out-Null
+          Copy-Item target/release/frun.exe preview/
+          Copy-Item LICENSE preview/LICENSE.txt
+          Copy-Item assets/FONT-LICENSE.txt preview/
+          Copy-Item docs/launcher-preview.md preview/README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frun-middle-mouse-pins-windows
+          path: preview/
+          if-no-files-found: error

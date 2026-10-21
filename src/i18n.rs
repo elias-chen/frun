@@ -19,6 +19,7 @@ strings!(
     updating, updated, up_to_date, src_start, src_store, tag_new, tag_current, admin_enter,
     err_missing, err_failed, tray_settings, tray_quit, add_dir, hidden, hidden_flash,
     tray_reindex, admin, menu_open, menu_folder, menu_hide, menu_exclude, auto_dir, auto_update, updated_to,
+    middle_mouse, mouse_failed, pinned_programs, pin_hint, menu_pin, menu_unpin,
 );
 
 const ZH: &str = include_str!("../locales/zh-CN.toml");

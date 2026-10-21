@@ -3,6 +3,7 @@ use crate::{
     app::*,
     config,
     gfx::{Align, Color, Gfx},
+    grid,
     index::Kind,
     textfield::TextField,
 };
@@ -114,6 +115,10 @@ impl App {
     }
 
     fn search_body(&mut self, g: &mut Gfx, w: f32) {
+        if self.pin_grid() {
+            self.pins_body(g, w);
+            return;
+        }
         let (t1, t2, t3, accent, kbd, danger, sel_c) = {
             let th = &self.theme;
             (th.t1, th.t2, th.t3, th.accent, th.kbd, th.danger, th.sel)
@@ -249,6 +254,58 @@ impl App {
         }
     }
 
+    fn pins_body(&mut self, g: &mut Gfx, w: f32) {
+        let (t1, t2, t3, well, sel, accent) = {
+            let th = &self.theme;
+            (th.t1, th.t2, th.t3, th.well, th.sel, th.accent)
+        };
+        g.text(&self.s.pinned_programs, PAD + 14.0, BAR, w / 2.0, grid::HEADER, 12.0, t2, Align::Left);
+        let pages = self.pin_pages();
+        if pages > 1 {
+            let right = w - PAD - 6.0;
+            let label = format!("{} / {}", self.pin_page + 1, pages);
+            g.text(&label, right - 134.0, BAR, 60.0, grid::HEADER, 12.0, t3, Align::Center);
+            for (step, x, enabled) in [(-1, right - 68.0, self.pin_page > 0), (1, right - 32.0, self.pin_page + 1 < pages)] {
+                let act = Act::PinPage(step);
+                g.fill(x, BAR + 2.0, 30.0, 28.0, 6.0, if self.hover == act && enabled { sel } else { well });
+                let dir = step as f32;
+                g.path(&[(x + 15.0 - dir * 2.0, BAR + 11.0), (x + 15.0 + dir * 2.0, BAR + 16.0), (x + 15.0 - dir * 2.0, BAR + 21.0)], false, 1.4, t2.a(if enabled { 1.0 } else { 0.3 }));
+                if enabled { self.hot(x, BAR + 2.0, 30.0, 28.0, act, None); }
+            }
+        } else {
+            g.text(&self.s.pin_hint, w / 2.0, BAR, w / 2.0 - PAD - 14.0, grid::HEADER, 12.0, t3, Align::Right);
+        }
+        let cell_w = (w - 2.0 * PAD) / grid::COLUMNS as f32;
+        let px = self.icon_px();
+        let press = self.anims.get(ID_PRESS, self.pressed.is_some() as u32 as f32, 110.0);
+        for i in 0..self.rows.len() {
+            let row = &self.rows[i];
+            let entry = &self.index.groups[row.group].members[row.member];
+            let (name, target, icon_key, kind) = (entry.name.clone(), entry.target.clone(), entry.icon_key(), entry.kind);
+            let x = PAD + (i % grid::COLUMNS) as f32 * cell_w;
+            let y = BAR + grid::HEADER + (i / grid::COLUMNS) as f32 * grid::CELL;
+            let selected = self.sel == i;
+            let inset = if selected { press * 1.5 } else { 0.0 };
+            g.fill(x + 3.0 + inset, y + 3.0 + inset, cell_w - 6.0 - 2.0 * inset, grid::CELL - 6.0 - 2.0 * inset, self.radius(), if selected { sel } else { well });
+            if selected {
+                g.outline(x + 3.0, y + 3.0, cell_w - 6.0, grid::CELL - 6.0, self.radius(), 1.0, accent.a(0.5));
+            }
+            let ix = x + (cell_w - 28.0) / 2.0;
+            if !g.icon(icon_key, px, ix, y + 16.0, 28.0, 1.0) {
+                self.icon_wanted.push(target.clone());
+                let first = name.chars().next().unwrap_or(' ');
+                let tile = if kind == Kind::Dir { TOOL_TILE } else { TILES[first as usize % TILES.len()] };
+                g.fill(ix, y + 16.0, 28.0, 28.0, 7.0, Color::rgb(tile));
+                g.text(&first.to_string(), ix, y + 16.0, 28.0, 28.0, 13.0, Color::white(1.0), Align::Center);
+            }
+            g.text(&name, x + 8.0, y + 50.0, cell_w - 16.0, 30.0, 14.0, t1, Align::Center);
+            if self.error.as_ref().is_some_and(|(t, _)| *t == target) {
+                g.circle(x + cell_w - 14.0, y + 14.0, 3.0, self.theme.danger);
+            }
+            self.hot(x + 3.0, y + 3.0, cell_w - 6.0, grid::CELL - 6.0, Act::Row(i), Some(i));
+        }
+    }
+
     // ---------- 设置 ----------
 
     fn settings_head(&mut self, g: &mut Gfx, w: f32, live: bool) {
@@ -360,8 +417,9 @@ impl App {
                     left = right - sw;
                     self.seg(g, id, left, cy - 17.0, sw, &labels, self.seg_value(row), Some(Some(i)), |j| Act::Seg(row, j));
                 }
-                SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => {
+                SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => {
                     label = match row {
+                        SRow::MiddleMouse => &self.s.middle_mouse,
                         SRow::Ime => &self.s.ime,
                         SRow::Autostart => &self.s.autostart,
                         SRow::Admin => &self.s.admin,
