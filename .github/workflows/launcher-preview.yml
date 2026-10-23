@@ -24,7 +24,7 @@ jobs:
           Copy-Item target/release/frun.exe preview/
           Copy-Item LICENSE preview/LICENSE.txt
           Copy-Item assets/FONT-LICENSE.txt preview/
-          Copy-Item docs/launcher-preview.md preview/README.md
+          Copy-Item docs/usage.md preview/README.md
       - uses: actions/upload-artifact@v4
         with:
           name: frun-middle-mouse-pins-windows

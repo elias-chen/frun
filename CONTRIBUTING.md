@@ -1,52 +1,32 @@
-# Contributing to frun
+# Contributing to this fork
 
-frun is a small project with one maintainer who decides what it does and how it looks.
-These rules keep the issue list about frun and nothing else. Issues can be written in
-English or 中文.
+This repository is [elias-chen/frun](https://github.com/elias-chen/frun), based on [Nongfsq/frun](https://github.com/Nongfsq/frun). Report problems with this fork here rather than in the upstream project. Issues and pull requests may be written in English or 中文.
 
-## Issues
+## Report a problem
 
-Use one of the two forms. Blank issues are turned off. An issue filed another way,
-for example by an assistant through the API, is accepted when it is as complete: the
-frun version, the Windows version, and steps that reproduce the problem. The
-`frun --doctor` report is still needed when a program is missing or should not be
-there.
+Include the frun version, Windows version, steps to reproduce, and expected and actual behavior. For mouse or window issues, include the hold duration, pause/exclusion state, monitor scaling, and whether the affected app runs as administrator.
 
-**Something is wrong.** A program is missing or should not be there, or frun
-misbehaves. The form asks for your frun version, your Windows version, and the full
-output of `frun --doctor`. For a missing program, run
-`frun --doctor "C:\path\to\program.exe"`; the report starts by saying why that file
-was left out. The report lists folder and program paths from your computer, so read
-it before you paste it. Update to the latest version first.
+For missing or incorrectly indexed programs, run `frun --doctor` or `frun --doctor "C:\path\to\program.exe"`. The report contains local paths; review it before sharing.
 
-**Suggestion.** Describe what you were trying to do before describing a solution.
-Most suggestions are declined, because of what frun is:
+## Develop
 
-- It opens programs. It does not search files or documents, the web, or settings,
-  and it does not run commands or calculations. Paths are there to reach a folder.
-- It keeps steps and words to a minimum. A key or a gesture is preferred over a
-  setting, and a setting over an explanation.
-- Anything it can keep current by itself, such as the index, the theme, or the
-  screen it opens on, does not get a manual step.
-- It stays light: one small exe, no installer, no runtime, no web view. A change
-  that adds noticeably to its size or memory has to be worth it.
-- It supports Windows 10 and 11.
+Use stable Rust on Windows 10 or 11, x64:
 
-An issue is closed without a reply, and may be locked or deleted, when it is:
+```powershell
+cargo check --locked --tests
+cargo test --locked
+cargo build --release --locked
+```
 
-- an advertisement, an invitation, a request to list or promote frun somewhere, or
-  anything else that is not about frun;
-- missing what the form asks for, or filled with placeholders;
-- a duplicate of an open or closed issue;
-- a question that the README answers.
+Keep changes focused and describe the user-visible behavior and validation in the pull request. Preserve the MIT notice and bundled font license. Changes to global input handling, foreground activation, or display placement also need Windows manual testing; the checklist is in [docs/usage.md](docs/usage.md).
 
-Accounts that post advertisements are blocked.
+## Release
 
-## Pull requests
+1. Bump the package version in both Cargo.toml and the root frun entry in Cargo.lock.
+2. Update both READMEs and CHANGELOG.md; add release notes at `docs/releases/v<version>.md`.
+3. Merge after Windows PR checks pass. A push to main that changes Cargo.toml starts the release workflow. Dependency-only Cargo.toml changes also require a version bump for that workflow.
+4. The workflow validates the version, tests and builds the x64 executable, optionally signs it when SignPath is configured, and creates a draft. It uploads the standalone executable, SHA-256, licenses, and portable ZIP, downloads them again for verification, then publishes the release as latest.
 
-Pull requests from outside the project are not accepted, and the repository does not
-allow them to be opened. What frun does and how it looks are decided in one place,
-and a change that arrives without that discussion nearly always has to be redone.
+A pushed matching `v<version>` tag or a manual run of the release workflow on main can also start the same process. Tags must point at the exact source commit, and each version needs its own notes file. Runs are serialized. A rerun can finish an existing draft; an already published release at the same commit is left intact. A version tag pointing at a different commit fails instead of replacing published assets.
 
-If you want something changed, open an issue. If you have already written code,
-link your branch in the issue; it can be read there.
+The built-in updater depends on assets named exactly `frun.exe` and `frun.exe.sha256`. Do not rename them or publish a release without them. No signing credentials are required for an unsigned build.

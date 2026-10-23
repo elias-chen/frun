@@ -1,45 +1,88 @@
-# Builds a release from a pushed tag (v0.3.0 and so on) and leaves it as a draft.
-# The release notes are the tag's message: git tag -a v0.3.0 -F notes.md
-# When SignPath is set up (secret SIGNPATH_API_TOKEN, variable SIGNPATH_ORGANIZATION_ID),
-# frun.exe is signed first; each signing request waits for manual approval in SignPath.
-# Publishing the draft is a separate, manual step: installed copies update from the latest published release.
+# A Cargo.toml change merged to main publishes that version after Windows validation.
+# Matching v* tags and manual runs on main can retry the same release process.
 name: release
 
 on:
   push:
+    branches: [main]
+    paths: [Cargo.toml]
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
   actions: read
 
+concurrency:
+  group: frun-release
+  cancel-in-progress: false
+
 jobs:
   release:
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     env:
       SIGN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Tag matches Cargo.toml
-        shell: pwsh
-        run: |
-          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "Cargo.toml says $v, the tag is $env:GITHUB_REF_NAME" }
+        with:
+          fetch-depth: 0
 
       - run: rustup update stable --no-self-update
-      - run: cargo test --locked
-      - run: cargo build --release --locked
 
-      - uses: actions/upload-artifact@v4
+      - name: Resolve and validate release
+        id: meta
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ne 'X64') {
+            throw 'Release assets must be built on Windows x64'
+          }
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read Cargo metadata' }
+          $v = ($metadata.packages | Where-Object name -eq 'frun').version
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid stable version: $v" }
+          $tag = "v$v"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Cargo.toml says $v, the tag is $env:GITHUB_REF_NAME"
+          }
+          $notes = "docs/releases/$tag.md"
+          if (!(Test-Path $notes)) { throw "Missing release notes: $notes" }
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) {
+            $target = git rev-parse "$tag^{commit}"
+            if ($LASTEXITCODE -ne 0 -or $target -ne $env:GITHUB_SHA) {
+              throw "$tag already points at a different commit; bump the version"
+            }
+          }
+          $releases = gh release list --limit 100 --json tagName,isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot list releases' }
+          $existing = $releases | Where-Object tagName -eq $tag
+          $published = $null -ne $existing -and !$existing.isDraft
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+          "published=$($published.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if ($published) { "$tag is already published at this commit; leaving assets intact." >> $env:GITHUB_STEP_SUMMARY }
+
+      - if: steps.meta.outputs.published != 'true'
+        run: cargo check --locked --tests
+      - if: steps.meta.outputs.published != 'true'
+        run: cargo test --locked
+      - if: steps.meta.outputs.published != 'true'
+        run: cargo build --release --locked
+
+      - if: steps.meta.outputs.published != 'true'
+        uses: actions/upload-artifact@v4
         id: unsigned
         with:
           name: frun-unsigned
           path: target/release/frun.exe
           if-no-files-found: error
 
-      - if: env.SIGN == 'true'
+      # Optional: retain upstream's signing integration. Unsigned releases need no secrets.
+      - if: steps.meta.outputs.published != 'true' && env.SIGN == 'true'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -51,30 +94,75 @@ jobs:
           wait-for-completion-timeout-in-seconds: 7200
           output-artifact-directory: signed
 
-      - name: Assets
+      - name: Package assets
+        if: steps.meta.outputs.published != 'true'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          New-Item -ItemType Directory dist | Out-Null
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory dist, portable | Out-Null
           $exe = if ($env:SIGN -eq 'true') { 'signed/frun.exe' } else { 'target/release/frun.exe' }
           Copy-Item $exe dist/frun.exe
           if ($env:SIGN -eq 'true') {
             $s = Get-AuthenticodeSignature dist/frun.exe
-            if ($s.Status -ne 'Valid') { throw "signature is $($s.Status)" }
+            if ($s.Status -ne 'Valid') { throw "Signature is $($s.Status)" }
           }
-          # The format the built-in updater checks: "<sha256>  frun.exe" and a newline
+          # Required by the built-in updater: "<sha256>  frun.exe" plus LF.
           $hash = (Get-FileHash dist/frun.exe -Algorithm SHA256).Hash.ToLower()
-          [IO.File]::WriteAllText("$PWD/dist/frun.exe.sha256", "$hash  frun.exe`n")
+          [IO.File]::WriteAllText("$PWD/dist/frun.exe.sha256", "$hash  frun.exe" + [char]10)
           Copy-Item assets/FONT-LICENSE.txt dist/
           Copy-Item LICENSE dist/LICENSE.txt
+          Copy-Item dist/frun.exe, dist/frun.exe.sha256, dist/FONT-LICENSE.txt, dist/LICENSE.txt portable/
+          Copy-Item docs/usage.md portable/README.md
+          $zipName = "frun-$env:RELEASE_TAG-windows-x64.zip"
+          Compress-Archive -Path portable/* -DestinationPath "dist/$zipName"
+          $zipHash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$PWD/dist/$zipName.sha256", "$zipHash  $zipName" + [char]10)
           Get-ChildItem dist | Format-Table Name, Length
 
-      - name: Draft release
+      - name: Upload and verify draft assets
+        if: steps.meta.outputs.published != 'true'
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_NOTES: ${{ steps.meta.outputs.notes }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag (Get-ChildItem dist).FullName --clobber
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $releases = gh release list --limit 100 --json tagName,isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot list releases' }
+          $existing = $releases | Where-Object tagName -eq $tag
+          if ($existing -and !$existing.isDraft) { throw 'Refusing to overwrite a published release' }
+          $assets = (Get-ChildItem dist -File).FullName
+          if ($existing) {
+            gh release edit $tag --title "frun $($tag.TrimStart('v'))" --notes-file $env:RELEASE_NOTES
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot update draft notes' }
+            gh release upload $tag @assets --clobber
           } else {
-            gh release create $tag --draft --verify-tag --notes-from-tag --title "frun $($tag.TrimStart('v'))" (Get-ChildItem dist).FullName
+            gh release create $tag --draft --target $env:GITHUB_SHA --notes-file $env:RELEASE_NOTES --title "frun $($tag.TrimStart('v'))" @assets
           }
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot upload release assets' }
+          gh release download $tag --dir verify
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read back release assets' }
+          foreach ($asset in Get-ChildItem dist -File) {
+            $download = Join-Path verify $asset.Name
+            if (!(Test-Path $download)) { throw "Missing uploaded asset: $($asset.Name)" }
+            if ((Get-FileHash $asset.FullName).Hash -ne (Get-FileHash $download).Hash) {
+              throw "Uploaded asset differs: $($asset.Name)"
+            }
+          }
+
+      - name: Publish verified release
+        if: steps.meta.outputs.published != 'true'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release edit $env:RELEASE_TAG --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot publish release' }
+          $release = gh release view $env:RELEASE_TAG --json url,isDraft,isPrerelease | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.isDraft -or $release.isPrerelease) {
+            throw 'Release publication could not be verified'
+          }
+          "Published $($release.url)" >> $env:GITHUB_STEP_SUMMARY
