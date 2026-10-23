@@ -3,6 +3,7 @@ use crate::{
     app::*,
     config,
     gfx::{Align, Color, Gfx},
+    grid,
     index::Kind,
     textfield::TextField,
 };
@@ -114,6 +115,10 @@ impl App {
     }
 
     fn search_body(&mut self, g: &mut Gfx, w: f32) {
+        if self.pin_grid() {
+            self.pins_body(g, w);
+            return;
+        }
         let (t1, t2, t3, accent, kbd, danger, sel_c) = {
             let th = &self.theme;
             (th.t1, th.t2, th.t3, th.accent, th.kbd, th.danger, th.sel)
@@ -249,6 +254,58 @@ impl App {
         }
     }
 
+    fn pins_body(&mut self, g: &mut Gfx, w: f32) {
+        let (t1, t2, t3, well, sel, accent) = {
+            let th = &self.theme;
+            (th.t1, th.t2, th.t3, th.well, th.sel, th.accent)
+        };
+        g.text(&self.s.pinned_programs, PAD + 14.0, BAR, w / 2.0, grid::HEADER, 12.0, t2, Align::Left);
+        let pages = self.pin_pages();
+        if pages > 1 {
+            let right = w - PAD - 6.0;
+            let label = format!("{} / {}", self.pin_page + 1, pages);
+            g.text(&label, right - 134.0, BAR, 60.0, grid::HEADER, 12.0, t3, Align::Center);
+            for (step, x, enabled) in [(-1, right - 68.0, self.pin_page > 0), (1, right - 32.0, self.pin_page + 1 < pages)] {
+                let act = Act::PinPage(step);
+                g.fill(x, BAR + 2.0, 30.0, 28.0, 6.0, if self.hover == act && enabled { sel } else { well });
+                let dir = step as f32;
+                g.path(&[(x + 15.0 - dir * 2.0, BAR + 11.0), (x + 15.0 + dir * 2.0, BAR + 16.0), (x + 15.0 - dir * 2.0, BAR + 21.0)], false, 1.4, t2.a(if enabled { 1.0 } else { 0.3 }));
+                if enabled { self.hot(x, BAR + 2.0, 30.0, 28.0, act, None); }
+            }
+        } else {
+            g.text(&self.s.pin_hint, w / 2.0, BAR, w / 2.0 - PAD - 14.0, grid::HEADER, 12.0, t3, Align::Right);
+        }
+        let cell_w = (w - 2.0 * PAD) / grid::COLUMNS as f32;
+        let px = self.icon_px();
+        let press = self.anims.get(ID_PRESS, self.pressed.is_some() as u32 as f32, 110.0);
+        for i in 0..self.rows.len() {
+            let row = &self.rows[i];
+            let entry = &self.index.groups[row.group].members[row.member];
+            let (name, target, icon_key, kind) = (entry.name.clone(), entry.target.clone(), entry.icon_key(), entry.kind);
+            let x = PAD + (i % grid::COLUMNS) as f32 * cell_w;
+            let y = BAR + grid::HEADER + (i / grid::COLUMNS) as f32 * grid::CELL;
+            let selected = self.sel == i;
+            let inset = if selected { press * 1.5 } else { 0.0 };
+            g.fill(x + 3.0 + inset, y + 3.0 + inset, cell_w - 6.0 - 2.0 * inset, grid::CELL - 6.0 - 2.0 * inset, self.radius(), if selected { sel } else { well });
+            if selected {
+                g.outline(x + 3.0, y + 3.0, cell_w - 6.0, grid::CELL - 6.0, self.radius(), 1.0, accent.a(0.5));
+            }
+            let ix = x + (cell_w - 28.0) / 2.0;
+            if !g.icon(icon_key, px, ix, y + 16.0, 28.0, 1.0) {
+                self.icon_wanted.push(target.clone());
+                let first = name.chars().next().unwrap_or(' ');
+                let tile = if kind == Kind::Dir { TOOL_TILE } else { TILES[first as usize % TILES.len()] };
+                g.fill(ix, y + 16.0, 28.0, 28.0, 7.0, Color::rgb(tile));
+                g.text(&first.to_string(), ix, y + 16.0, 28.0, 28.0, 13.0, Color::white(1.0), Align::Center);
+            }
+            g.text(&name, x + 8.0, y + 50.0, cell_w - 16.0, 30.0, 14.0, t1, Align::Center);
+            if self.error.as_ref().is_some_and(|(t, _)| *t == target) {
+                g.circle(x + cell_w - 14.0, y + 14.0, 3.0, self.theme.danger);
+            }
+            self.hot(x + 3.0, y + 3.0, cell_w - 6.0, grid::CELL - 6.0, Act::Row(i), Some(i));
+        }
+    }
+
     // ---------- 设置 ----------
 
     fn settings_head(&mut self, g: &mut Gfx, w: f32, live: bool) {
@@ -257,11 +314,11 @@ impl App {
             g.circle(28.0, 28.0, 16.0, well);
         }
         g.path(&[(30.0, 23.0), (25.0, 28.0), (30.0, 33.0)], false, 1.5, t2);
-        let tabs_w = 288.0f32.min(w - 54.0 - 96.0);
+        let tabs_w = 352.0f32.min(w - 54.0 - 64.0);
         let tx = w - 12.0 - tabs_w;
         let title = self.s.settings.clone();
         g.text(&title, 54.0, 0.0, tx - 54.0 - 12.0, BAR, 20.0, t1, Align::Left);
-        let labels = [self.s.tab_general.clone(), self.s.tab_look.clone(), self.s.tab_dirs.clone()];
+        let labels = [self.s.tab_general.clone(), self.s.tab_look.clone(), self.s.tab_dirs.clone(), self.s.tab_wake.clone()];
         self.seg(g, ID_TABS, tx, 11.0, tabs_w, &labels, self.tab, live.then_some(None), |i| Act::Tab(i));
         if live {
             self.hot(0.0, 0.0, tx, BAR, Act::Bar, None);
@@ -323,13 +380,15 @@ impl App {
             (th.t1, th.t2, th.t3, th.accent, th.well, th.well2, th.danger, th.on_accent, th.sel)
         };
         let rows = self.srows();
-        let sel = self.set_sel.min(rows.len() - 1);
-        let sy = BAR + self.anims.get(ID_SET_SEL, sel as f32 * ROW, 110.0);
+        let start = self.settings_start();
+        let cap = self.settings_capacity();
+        let sel = self.set_sel.clamp(start, (start + cap - 1).min(rows.len() - 1));
+        let sy = BAR + self.anims.get(ID_SET_SEL, (sel - start) as f32 * ROW, 110.0);
         g.fill(PAD, sy, w - 2.0 * PAD, ROW, self.radius(), sel_c.a(0.8));
 
         let right = w - PAD - 8.0;
-        for (i, &row) in rows.iter().enumerate() {
-            let y = BAR + i as f32 * ROW;
+        for (i, &row) in rows.iter().enumerate().skip(start).take(cap) {
+            let y = BAR + (i - start) as f32 * ROW;
             let cy = y + ROW / 2.0;
             let id = ID_ROW + i as u32 + self.tab as u32 * 32;
             self.hot(PAD, y, w - 2.0 * PAD, ROW, Act::None, Some(i));
@@ -360,8 +419,11 @@ impl App {
                     left = right - sw;
                     self.seg(g, id, left, cy - 17.0, sw, &labels, self.seg_value(row), Some(Some(i)), |j| Act::Seg(row, j));
                 }
-                SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => {
+                SRow::Paused | SRow::ReuseWindows | SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => {
                     label = match row {
+                        SRow::MiddleMouse => &self.s.middle_mouse,
+                        SRow::Paused => &self.s.pause_wake,
+                        SRow::ReuseWindows => &self.s.reuse_windows,
                         SRow::Ime => &self.s.ime,
                         SRow::Autostart => &self.s.autostart,
                         SRow::Admin => &self.s.admin,
@@ -378,6 +440,48 @@ impl App {
                         g.text(version, left - vw - 14.0, y, vw + 1.0, ROW, 12.0, t3, Align::Left);
                     }
                     self.hot(left, cy - 22.0, 48.0, 44.0, Act::Toggle(row), Some(i));
+                }
+                SRow::HoldDelay => {
+                    label = self.s.hold_delay.clone();
+                    let value = self.hold_draft.unwrap_or(self.cfg.hold_ms);
+                    let t = (value - config::HOLD_MIN) as f32 / (config::HOLD_MAX - config::HOLD_MIN) as f32;
+                    left = right - 160.0;
+                    g.fill(left, cy - 3.0, 160.0, 6.0, 3.0, well2);
+                    g.circle(left + 9.0 + t * 142.0, cy, 9.0, accent);
+                    g.text(&format!("{value} ms"), left - 78.0, y, 66.0, ROW, 13.0, t2, Align::Right);
+                    self.hot(left, cy - 16.0, 160.0, 32.0, Act::HoldSlider, Some(i));
+                    left -= 90.0;
+                }
+                SRow::BlockedFile | SRow::BlockedRunning | SRow::RunningBack => {
+                    label = match row {
+                        SRow::BlockedFile => self.s.exclude_file.clone(),
+                        SRow::BlockedRunning => self.s.exclude_running.clone(),
+                        _ => self.s.running_back.clone(),
+                    };
+                    let text = if row == SRow::RunningBack { self.s.back.clone() } else { self.s.add_app.clone() };
+                    let bw = g.measure(&text, 13.0) + 28.0;
+                    left = right - bw;
+                    let act = Act::Button(row);
+                    g.fill(left, cy - 17.0, bw, 34.0, 10.0, if self.hover == act { well2 } else { well });
+                    g.text(&text, left, cy - 17.0, bw, 34.0, 13.0, t1, Align::Center);
+                    self.hot(left, cy - 17.0, bw, 34.0, act, Some(i));
+                }
+                SRow::BlockedItem(n) => {
+                    label = self.cfg.excluded_apps[n].clone();
+                    label_color = t2;
+                    let x = self.round_button(g, right, cy, Act::RemoveBlocked(n), i, true);
+                    g.path(&[(x + 12.0, cy - 4.0), (x + 20.0, cy + 4.0)], false, 1.5, danger);
+                    g.path(&[(x + 12.0, cy + 4.0), (x + 20.0, cy - 4.0)], false, 1.5, danger);
+                    left = x;
+                }
+                SRow::RunningItem(n) => {
+                    let app = &self.running_apps[n];
+                    let name = crate::gesture::exe_name(&app.exe).unwrap_or_default();
+                    label = format!("{} · {}", name, app.title);
+                    let act = Act::BlockApp(n);
+                    self.hot(PAD, y, w - 2.0 * PAD, ROW, act, Some(i));
+                    g.text("+", right - 32.0, y, 32.0, ROW, 20.0, accent, Align::Center);
+                    left = right - 42.0;
                 }
                 SRow::Hotkey | SRow::Position => {
                     let (name, text, color, note, note_color) = match row {
@@ -602,6 +706,12 @@ impl App {
             if !label.is_empty() {
                 g.text(&label, label_x, y, left - 16.0 - label_x, ROW, 15.0, label_color, Align::Left);
             }
+        }
+        if rows.len() > cap {
+            let track = cap as f32 * ROW;
+            let thumb = (track * cap as f32 / rows.len() as f32).max(16.0);
+            let y = BAR + (track - thumb) * start as f32 / (rows.len() - cap) as f32;
+            g.fill(w - 4.0, y, 2.0, thumb, 1.0, t3.a(0.5));
         }
     }
 }

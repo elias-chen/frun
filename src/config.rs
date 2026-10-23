@@ -13,6 +13,8 @@ pub const ROWS_MIN: u32 = 4;
 pub const ROWS_MAX: u32 = 12;
 pub const DEFAULT_CX: f32 = 0.5;
 pub const DEFAULT_TY: f32 = 0.21;
+pub const HOLD_MIN: u32 = 200;
+pub const HOLD_MAX: u32 = 1000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -21,6 +23,13 @@ pub struct Config {
     pub language: String,
     /// Ctrl / Alt / Shift / Win 加一个键，如 "Ctrl+Alt+K"
     pub hotkey: String,
+    /// 鼠标中键长按呼出，短按交还当前应用。
+    pub middle_mouse: bool,
+    pub hold_ms: u32,
+    pub excluded_apps: Vec<String>,
+    pub reuse_windows: bool,
+    /// 固定软件的启动目标，顺序与首页一致。
+    pub pins: Vec<String>,
     pub ime_english: bool,
     /// "system" / "light" / "dark"
     pub theme: String,
@@ -54,6 +63,11 @@ impl Default for Config {
         Self {
             language: String::new(),
             hotkey: "Alt+Space".into(),
+            middle_mouse: true,
+            hold_ms: 400,
+            excluded_apps: Vec::new(),
+            reuse_windows: true,
+            pins: Vec::new(),
             ime_english: true,
             theme: "system".into(),
             corners: "round".into(),
@@ -81,6 +95,12 @@ impl Config {
         self.max_rows = self.max_rows.clamp(ROWS_MIN, ROWS_MAX);
         self.cx = self.cx.clamp(0.0, 1.0);
         self.ty = self.ty.clamp(0.0, 1.0);
+        self.hold_ms = self.hold_ms.clamp(HOLD_MIN, HOLD_MAX);
+        self.excluded_apps = self.excluded_apps.into_iter().filter_map(|p| crate::gesture::exe_name(&p)).collect();
+        let mut excluded = HashSet::new();
+        self.excluded_apps.retain(|p| excluded.insert(p.clone()));
+        let mut seen = HashSet::new();
+        self.pins.retain(|p| !p.is_empty() && seen.insert(p.to_lowercase()));
         self
     }
 }
@@ -243,5 +263,29 @@ mod tests {
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.hotkey, "Alt+Space");
         assert_eq!(back.exts, ["exe", "lnk", "bat", "cmd"]);
+    }
+
+    #[test]
+    fn legacy_settings_load_and_pin_order_survives_restart() {
+        let legacy: Config = toml::from_str("hotkey = 'Ctrl+Alt+K'").unwrap();
+        assert_eq!(legacy.hotkey, "Ctrl+Alt+K");
+        assert!(legacy.middle_mouse);
+        assert!(legacy.pins.is_empty());
+        let text = "middle_mouse = false\npins = ['D:\\Tools\\B.exe', '', 'd:\\tools\\b.exe', 'shell:AppsFolder\\a!App']";
+        let cfg = toml::from_str::<Config>(text).unwrap().sanitize();
+        let back = toml::from_str::<Config>(&toml::to_string(&cfg).unwrap()).unwrap().sanitize();
+        assert!(!back.middle_mouse);
+        assert_eq!(back.pins, [r"D:\Tools\B.exe", r"shell:AppsFolder\a!App"]);
+        assert_eq!(back.hold_ms, 400);
+        assert!(back.reuse_windows);
+    }
+
+    #[test]
+    fn hold_limits_and_exclusion_names_survive_config_round_trip() {
+        let cfg = Config { hold_ms: 9000, excluded_apps: vec![r"D:\Games\CS2.EXE".into(), "cs2.exe".into(), "".into(), "sekiro.exe".into()], ..Default::default() }.sanitize();
+        let back = toml::from_str::<Config>(&toml::to_string(&cfg).unwrap()).unwrap().sanitize();
+        assert_eq!(back.hold_ms, HOLD_MAX);
+        assert_eq!(back.excluded_apps, ["cs2.exe", "sekiro.exe"]);
+        assert_eq!(Config { hold_ms: 0, ..Default::default() }.sanitize().hold_ms, HOLD_MIN);
     }
 }

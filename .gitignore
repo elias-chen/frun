@@ -20,6 +20,8 @@ Desktop.ini
 /design/
 /docs/*
 !/docs/media/
+!/docs/usage.md
+!/docs/releases/
 /AGENTS.md
 /CLAUDE.md
 

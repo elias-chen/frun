@@ -2,8 +2,12 @@
 use crate::{
     config::{self, Config, Store},
     gfx::{Color, Gfx},
+    grid,
+    desktop,
+    gesture,
     i18n::{self, Strings},
     index::{self, Index, Kind},
+    mouse::{self, MiddleMouse},
     paths,
     platform::*,
     scan::{self, WM_ICONS, WM_INDEX, WM_PROGRESS},
@@ -29,7 +33,6 @@ use windows::{
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_SUMMON: u32 = WM_APP + 8;
-const HOTKEY_ID: i32 = 1;
 const TIMER_FRAME: usize = 1;
 const TIMER_DIRTY: usize = 2;
 const TIMER_CARET: usize = 3;
@@ -192,6 +195,15 @@ pub enum Mode {
 pub enum SRow {
     Lang,
     Hotkey,
+    MiddleMouse,
+    HoldDelay,
+    Paused,
+    ReuseWindows,
+    BlockedFile,
+    BlockedRunning,
+    BlockedItem(usize),
+    RunningItem(usize),
+    RunningBack,
     Ime,
     Autostart,
     Admin,
@@ -218,12 +230,16 @@ pub enum Act {
     Bar,
     QueryField,
     Row(usize),
+    PinPage(i32),
     OpenSettings,
     Back,
     Tab(usize),
     Seg(SRow, usize),
     Toggle(SRow),
     Slider,
+    HoldSlider,
+    RemoveBlocked(usize),
+    BlockApp(usize),
     Step(i32),
     Button(SRow),
     Remove(usize),
@@ -266,6 +282,7 @@ enum DragKind {
     Right,
     Corner,
     Slider,
+    HoldSlider,
 }
 
 struct Drag {
@@ -309,6 +326,9 @@ pub struct App {
     pub query: TextField,
     pub rows: Vec<Row>,
     pub sel: usize,
+    pub pin_page: usize,
+    pub pin_total: usize,
+    pointer_anchor: Option<POINT>,
     expanded: Option<usize>,
     /// 路径模式下这一层列出的文件夹和程序；`paths` 是同样内容做成的分组，给结果行用
     pub path_items: Vec<paths::Item>,
@@ -333,6 +353,11 @@ pub struct App {
 
     pub tab: usize,
     pub set_sel: usize,
+    pub settings_offset: usize,
+    pub hold_draft: Option<u32>,
+    pub wake_paused: bool,
+    pub choosing_app: bool,
+    pub running_apps: Vec<desktop::Window>,
     pub path: TextField,
     pub ext: TextField,
     pub recording: bool,
@@ -356,11 +381,13 @@ pub struct App {
 
     drag: Option<Drag>,
     watchers: Watchers,
+    mouse: Option<MiddleMouse>,
     /// 已经下载好的新版本：(版本号, 文件)，面板收起时换上
     update_ready: Option<(String, std::path::PathBuf)>,
     /// 刚换上的新版本号：下次呼出时提示一次
     just_updated: Option<String>,
     tray_icon: HICON,
+    paused_icon: HICON,
     taskbar_created: u32,
     timer_rate: u32,
 }
@@ -429,6 +456,14 @@ pub fn run(updated: Option<String>) -> Result<()> {
             config::save(&cfg);
         }
         let store = Store::load();
+        let mouse = match MiddleMouse::start(hwnd, mouse::Settings::from_config(&cfg, false, false)) {
+            Ok(trigger) => { if !trigger.status().mouse_ok { cfg.middle_mouse = false; } Some(trigger) },
+            Err(e) => {
+                scan::log(&format!("middle mouse unavailable: {e}"));
+                cfg.middle_mouse = false;
+                None
+            }
+        };
         let theme = Theme::new(true);
         let mut app = App {
             hwnd,
@@ -437,6 +472,7 @@ pub fn run(updated: Option<String>) -> Result<()> {
             index: index::load(&store),
             store,
             tray_icon: tray_icon(),
+            paused_icon: paused_tray_icon(),
             theme,
             anims: Anims::default(),
             hots: Vec::new(),
@@ -449,6 +485,9 @@ pub fn run(updated: Option<String>) -> Result<()> {
             query: TextField::default(),
             rows: Vec::new(),
             sel: 0,
+            pin_page: 0,
+            pin_total: 0,
+            pointer_anchor: None,
             expanded: None,
             path_items: Vec::new(),
             paths: Vec::new(),
@@ -467,6 +506,11 @@ pub fn run(updated: Option<String>) -> Result<()> {
             caret_on: true,
             tab: 0,
             set_sel: 0,
+            settings_offset: 0,
+            hold_draft: None,
+            wake_paused: false,
+            choosing_app: false,
+            running_apps: Vec::new(),
             path: TextField::default(),
             ext: TextField::default(),
             recording: false,
@@ -485,6 +529,7 @@ pub fn run(updated: Option<String>) -> Result<()> {
             pulse: Instant::now(),
             drag: None,
             watchers: Watchers::default(),
+            mouse,
             update_ready: None,
             just_updated: None,
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -550,8 +595,11 @@ impl App {
     }
 
     fn target_h(&self) -> f32 {
+        if self.pin_grid() {
+            return BAR + grid::HEADER + self.rows.len().div_ceil(grid::COLUMNS) as f32 * grid::CELL + PAD;
+        }
         let rows = match self.mode {
-            Mode::Settings => self.srows().len(),
+            Mode::Settings => self.srows().len().min(self.settings_capacity()),
             Mode::Search if self.rows.is_empty() => self.note().is_some() as usize,
             Mode::Search => self.rows.len(),
         };
@@ -564,10 +612,15 @@ impl App {
         let h = self.anims.get(ID_H, self.target_h(), 140.0);
         let (w, h) = ((self.width() * k).round() as i32, (h * k).round() as i32);
         let (sw, sh) = ((self.work.right - self.work.left) as f32, (self.work.bottom - self.work.top) as f32);
-        let x = self.work.left + (self.cfg.cx * sw).round() as i32 - w / 2;
-        let y = self.work.top + (self.cfg.ty * sh).round() as i32;
+        let (x, y) = if let Some(at) = self.pointer_anchor {
+            grid::anchored(gesture::Point { x: at.x, y: at.y },
+                [self.work.left, self.work.top, self.work.right, self.work.bottom], (w, h), k)
+        } else {
+            (self.work.left + (self.cfg.cx * sw).round() as i32 - w / 2,
+             self.work.top + (self.cfg.ty * sh).round() as i32)
+        };
         let x = x.clamp(self.work.left, (self.work.right - w).max(self.work.left));
-        let y = y.clamp(self.work.top, (self.work.bottom - (BAR * k) as i32).max(self.work.top));
+        let y = y.clamp(self.work.top, (self.work.bottom - h).max(self.work.top));
         let flags = SWP_NOACTIVATE | if show { SWP_SHOWWINDOW } else { SWP_NOZORDER };
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, flags);
@@ -576,13 +629,18 @@ impl App {
 
     // ---------- 显示与收起 ----------
 
-    pub fn show(&mut self) {
+    pub fn show(&mut self) { self.show_at(None); }
+
+    fn show_at(&mut self, point: Option<POINT>) {
+        self.pointer_anchor = point;
         let began = Instant::now();
         self.end_fade();
-        (self.work, self.dpi) = monitor(self.cfg.screen == "primary");
+        (self.work, self.dpi) = point.map(monitor_at).unwrap_or_else(|| monitor(self.cfg.screen == "primary"));
         self.refresh_theme();
         self.mode = Mode::Search;
         self.query.clear();
+        self.pin_page = 0;
+        self.sel = 0;
         self.expanded = None;
         self.error = None;
         self.auto_rescanned = false;
@@ -905,6 +963,17 @@ impl App {
         }
         self.path_items.clear();
         self.paths.clear();
+        let pins = self.index.pinned(&self.cfg.pins);
+        self.pin_total = pins.len();
+        if q.trim().is_empty() && !pins.is_empty() {
+            let size = self.pin_page_size();
+            self.pin_page = self.pin_page.min(grid::pages(pins.len(), size) - 1);
+            self.rows = pins[grid::page(pins.len(), size, self.pin_page)].iter().map(|&(group, member)| Row {
+                group, member, variant: false, current: false, stack: 0, marks: Vec::new(), path: false,
+            }).collect();
+            self.sel = self.sel.min(self.rows.len().saturating_sub(1));
+            return;
+        }
         let mut rows = Vec::new();
         let typed: Vec<char> = q.trim().to_lowercase().chars().collect();
         for hit in search::run(&self.index, &self.store, &q, max) {
@@ -954,6 +1023,55 @@ impl App {
         if self.rows.is_empty() && !q.trim().is_empty() && !self.auto_rescanned && self.visible {
             self.auto_rescanned = true;
             self.scan(Scan::Auto, false);
+        }
+    }
+
+    pub fn pin_grid(&self) -> bool {
+        self.mode == Mode::Search && self.pin_total > 0 && self.query.string().trim().is_empty()
+    }
+
+    pub fn pin_page_size(&self) -> usize {
+        let height = (self.work.bottom - self.work.top) as f32 * 0.85 / self.k();
+        grid::page_size(height - BAR - PAD)
+    }
+
+    pub fn pin_pages(&self) -> usize {
+        grid::pages(self.pin_total, self.pin_page_size())
+    }
+
+    fn change_pin_page(&mut self, step: i32) {
+        if !self.pin_grid() { return; }
+        self.pin_page = (self.pin_page as i32 + step).clamp(0, self.pin_pages() as i32 - 1) as usize;
+        self.sel = 0;
+        self.requery();
+    }
+
+    pub fn is_pinned(&self, row: usize) -> bool {
+        self.rows.get(row).filter(|r| !r.path).is_some_and(|r| {
+            self.index.groups[r.group].members.iter().any(|m| self.cfg.pins.iter().any(|p| p.eq_ignore_ascii_case(&m.target)))
+        })
+    }
+
+    pub fn toggle_pin(&mut self, i: usize) {
+        let Some(row) = self.rows.get(i).filter(|r| !r.path) else { return };
+        let group = &self.index.groups[row.group];
+        if self.is_pinned(i) {
+            self.cfg.pins.retain(|p| !group.members.iter().any(|m| p.eq_ignore_ascii_case(&m.target)));
+        } else {
+            self.cfg.pins.push(group.members[row.member].target.clone());
+        }
+        self.changed();
+        self.requery();
+    }
+
+    /// Anchor keyboard context menus to the selected tile or search row.
+    pub fn row_anchor(&self, i: usize) -> (f32, f32) {
+        if self.pin_grid() {
+            let cell_w = (self.width() - 2.0 * PAD) / grid::COLUMNS as f32;
+            (PAD + (i % grid::COLUMNS) as f32 * cell_w + 16.0,
+             BAR + grid::HEADER + (i / grid::COLUMNS) as f32 * grid::CELL + 60.0)
+        } else {
+            (60.0, BAR + (i as f32 + 0.8) * ROW)
         }
     }
 
@@ -1063,7 +1181,11 @@ impl App {
         }
     }
 
-    pub fn launch(&mut self, i: usize, admin: bool) {
+    pub fn launch(&mut self, i: usize, admin: bool) { self.launch_inner(i, admin, false); }
+
+    pub fn launch_new(&mut self, i: usize) { self.launch_inner(i, false, true); }
+
+    fn launch_inner(&mut self, i: usize, admin: bool, force_new: bool) {
         let Some(row) = self.rows.get(i) else { return };
         if self.pressed.is_some() {
             return;
@@ -1092,10 +1214,19 @@ impl App {
             unsafe { ShellExecuteExW(&mut info) }
         };
         let cancelled = |e: &Error| e.code() == ERROR_CANCELLED.to_hresult();
-        let result = match run(admin || default_admin) {
+        let reuse = if self.cfg.reuse_windows && !admin && !default_admin && !force_new {
+            desktop::activate(&entry)
+        } else { desktop::Reuse::Missing };
+        if reuse == desktop::Reuse::Denied {
+            self.error = Some((entry.target.clone(), self.s.err_activate.clone()));
+            return;
+        }
+        // Hide immediately after a successful focus switch; do not let our topmost
+        // panel cover the restored application during the launch animation.
+        let result = if reuse == desktop::Reuse::Activated { Ok(()) } else { match run(admin || default_admin) {
             Err(e) if default_admin && !cancelled(&e) => run(false),
             other => other,
-        };
+        } };
         if let Err(e) = result {
             let code = e.code();
             if cancelled(&e) {
@@ -1121,7 +1252,7 @@ impl App {
         }
         self.store.save();
         self.index.choose_all(&self.store);
-        self.pressed = Some(Instant::now());
+        if reuse == desktop::Reuse::Activated { self.hide(); } else { self.pressed = Some(Instant::now()); }
     }
 
     /// 在资源管理器里打开程序所在的文件夹并选中它。
@@ -1226,8 +1357,15 @@ impl App {
 
     pub fn srows(&self) -> Vec<SRow> {
         match self.tab {
-            0 => vec![SRow::Lang, SRow::Hotkey, SRow::Ime, SRow::Autostart, SRow::Admin, SRow::Update],
+            0 => vec![SRow::Lang, SRow::Ime, SRow::Autostart, SRow::Admin, SRow::ReuseWindows, SRow::Update],
             1 => vec![SRow::Theme, SRow::Corners, SRow::Size, SRow::MaxRows, SRow::Position, SRow::Screen, SRow::Reduce],
+            3 => {
+                if self.choosing_app {
+                    return std::iter::once(SRow::RunningBack).chain((0..self.running_apps.len()).map(SRow::RunningItem)).collect();
+                }
+                [SRow::Paused, SRow::Hotkey, SRow::MiddleMouse, SRow::HoldDelay, SRow::BlockedFile, SRow::BlockedRunning]
+                    .into_iter().chain((0..self.cfg.excluded_apps.len()).map(SRow::BlockedItem)).collect()
+            }
             _ => {
                 let mut rows: Vec<SRow> =
                     (0..self.cfg.dirs.len()).map(SRow::Folder).chain([SRow::Add, SRow::Ext, SRow::Status]).collect();
@@ -1243,6 +1381,54 @@ impl App {
         }
     }
 
+    pub fn settings_capacity(&self) -> usize {
+        (((self.work.bottom - self.work.top) as f32 * 0.9 / self.k() - BAR - PAD) / ROW).floor().max(1.0) as usize
+    }
+    pub fn settings_start(&self) -> usize { self.settings_offset.min(self.srows().len().saturating_sub(self.settings_capacity())) }
+    fn ensure_settings_visible(&mut self) {
+        let n = self.srows().len();
+        self.set_sel = self.set_sel.min(n.saturating_sub(1));
+        let cap = self.settings_capacity();
+        let start = self.settings_start();
+        self.settings_offset = if self.set_sel < start { self.set_sel } else if self.set_sel >= start + cap { self.set_sel + 1 - cap } else { start };
+    }
+    pub fn wake_status(&self) -> mouse::Status { self.mouse.as_ref().map(|m| m.status()).unwrap_or_default() }
+    fn wake_allowed(&self) -> bool {
+        if self.wake_paused || unsafe { GetForegroundWindow().is_invalid() } { return false; }
+        // Recheck at dispatch as well: focus may change after the service queued
+        // a trigger but before the UI thread processes it.
+        desktop::foreground().map_or_else(|| self.wake_status().excluded.is_empty(),
+            |w| !gesture::excluded(&w.exe, &self.cfg.excluded_apps))
+    }
+    pub fn toggle_pause(&mut self) {
+        self.wake_paused = !self.wake_paused;
+        self.cancel_recording();
+        self.register_hotkey();
+        self.close_menu(false);
+        self.hide();
+        self.tray(NIM_MODIFY);
+    }
+    fn add_exclusion(&mut self, path: &str) {
+        if let Some(exe) = gesture::exe_name(path) {
+            if !self.cfg.excluded_apps.iter().any(|s| s.eq_ignore_ascii_case(&exe)) { self.cfg.excluded_apps.push(exe); }
+            self.choosing_app = false;
+            self.set_sel = 0;
+            self.settings_offset = 0;
+            self.changed();
+            self.register_hotkey();
+        }
+    }
+    fn remove_exclusion(&mut self, i: usize) {
+        if i < self.cfg.excluded_apps.len() {
+            self.cfg.excluded_apps.remove(i);
+            self.changed();
+            self.register_hotkey();
+            self.ensure_settings_visible();
+        }
+    }
+    fn choose_running_app(&mut self, i: usize) {
+        if let Some(app) = self.running_apps.get(i) { let path = app.exe.clone(); self.add_exclusion(&path); }
+    }
     pub fn srow(&self) -> Option<SRow> {
         self.srows().get(self.set_sel).copied()
     }
@@ -1273,6 +1459,8 @@ impl App {
             self.cancel_recording();
             self.tab = tab;
             self.set_sel = 0;
+            self.settings_offset = 0;
+            self.choosing_app = false;
             self.anims.set(ID_SET_SEL, 0.0);
             self.bump();
         }
@@ -1319,6 +1507,9 @@ impl App {
 
     pub fn switch_value(&self, row: SRow) -> bool {
         match row {
+            SRow::MiddleMouse => self.cfg.middle_mouse,
+            SRow::Paused => self.wake_paused,
+            SRow::ReuseWindows => self.cfg.reuse_windows,
             SRow::Ime => self.cfg.ime_english,
             SRow::Autostart => autostart(),
             SRow::Admin => self.cfg.admin,
@@ -1330,6 +1521,17 @@ impl App {
 
     fn set_switch(&mut self, row: SRow, on: bool) {
         match row {
+            SRow::Paused => { if self.wake_paused != on { self.toggle_pause(); } return; }
+            SRow::ReuseWindows => self.cfg.reuse_windows = on,
+            SRow::MiddleMouse => {
+                self.cfg.middle_mouse = on;
+                self.register_hotkey();
+                if on && !self.wake_status().mouse_ok {
+                    self.cfg.middle_mouse = false;
+                    self.flash = self.s.mouse_failed.clone();
+                    self.flash_until = Some(Instant::now() + FLASH);
+                }
+            }
             SRow::Ime => self.cfg.ime_english = on,
             SRow::Autostart => set_autostart(on),
             SRow::Admin => self.cfg.admin = on,
@@ -1371,6 +1573,15 @@ impl App {
 
     fn press_button(&mut self, row: SRow) {
         match row {
+            SRow::BlockedFile => { if !self.pinned { self.pinned = spawn_pick_exe(self.hwnd); } }
+            SRow::BlockedRunning => {
+                let mut seen = HashSet::new();
+                self.running_apps = desktop::windows().into_iter().filter(|w| gesture::exe_name(&w.exe).is_some_and(|n| seen.insert(n))).collect();
+                self.choosing_app = true;
+                self.set_sel = 0;
+                self.settings_offset = 0;
+            }
+            SRow::RunningBack => { self.choosing_app = false; self.set_sel = 0; self.settings_offset = 0; }
             SRow::Hotkey => {
                 if self.recording {
                     self.cancel_recording();
@@ -1378,9 +1589,7 @@ impl App {
                     // 录制期间先让出当前热键，否则按它只会收起面板
                     self.recording = true;
                     self.hotkey_note = None;
-                    unsafe {
-                        let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_ID);
-                    }
+                    self.register_hotkey();
                 }
             }
             SRow::Position => {
@@ -1393,12 +1602,7 @@ impl App {
     }
 
     fn register_hotkey(&self) -> bool {
-        unsafe {
-            let _ = UnregisterHotKey(Some(self.hwnd), HOTKEY_ID);
-            config::parse_hotkey(&self.cfg.hotkey).is_some_and(|(mods, vk)| {
-                RegisterHotKey(Some(self.hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT, vk).is_ok()
-            })
-        }
+        self.mouse.as_ref().is_some_and(|m| m.configure(mouse::Settings::from_config(&self.cfg, self.wake_paused, self.recording)))
     }
 
     fn cancel_recording(&mut self) {
@@ -1617,7 +1821,8 @@ impl App {
                 let v = (self.seg_value(row) as i32 + d).clamp(0, n - 1) as usize;
                 self.set_seg(row, v);
             }
-            SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, d > 0),
+            SRow::Paused | SRow::ReuseWindows | SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, d > 0),
+            SRow::HoldDelay => self.set_hold((self.cfg.hold_ms as i32 + d * 50).clamp(config::HOLD_MIN as i32, config::HOLD_MAX as i32) as u32),
             SRow::Size => self.set_scale((self.cfg.scale as i32 + d * 5) as u32),
             SRow::Hidden => self.hidden_open = d > 0,
             SRow::MaxRows => self.step_rows(d),
@@ -1629,8 +1834,10 @@ impl App {
     fn activate(&mut self) {
         let Some(row) = self.srow() else { return };
         match row {
-            SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, !self.switch_value(row)),
-            SRow::Hotkey | SRow::Position => self.press_button(row),
+            SRow::Paused | SRow::ReuseWindows | SRow::MiddleMouse | SRow::Ime | SRow::Autostart | SRow::Admin | SRow::Update | SRow::Reduce => self.set_switch(row, !self.switch_value(row)),
+            SRow::Hotkey | SRow::Position | SRow::BlockedFile | SRow::BlockedRunning | SRow::RunningBack => self.press_button(row),
+            SRow::RunningItem(i) => self.choose_running_app(i),
+            SRow::BlockedItem(i) => self.remove_exclusion(i),
             SRow::Status => self.scan(Scan::Manual, true),
             SRow::Hidden => self.hidden_open = !self.hidden_open,
             SRow::HiddenItem(i) => self.restore(i),
@@ -1677,6 +1884,23 @@ impl App {
 
     fn key_search(&mut self, vk: u32, ctrl: bool, alt: bool, shift: bool, repeat: bool) -> bool {
         let is = |k: VIRTUAL_KEY| vk == k.0 as u32;
+        if ctrl && vk == b'P' as u32 {
+            if !repeat { self.toggle_pin(self.sel); }
+            return true;
+        }
+        if self.pin_grid() && !ctrl && !alt && !shift {
+            if is(VK_PRIOR) || is(VK_NEXT) {
+                self.change_pin_page(if is(VK_PRIOR) { -1 } else { 1 });
+                return true;
+            }
+            let step = if is(VK_LEFT) { -1 } else if is(VK_RIGHT) { 1 }
+                else if is(VK_UP) { -(grid::COLUMNS as i32) } else if is(VK_DOWN) { grid::COLUMNS as i32 }
+                else { 0 };
+            if step != 0 {
+                self.sel = (self.sel as i32 + step).clamp(0, self.rows.len().saturating_sub(1) as i32) as usize;
+                return true;
+            }
+        }
         if (ctrl || alt) && (b'1' as u32..=b'8' as u32).contains(&vk) {
             self.launch((vk - b'1' as u32) as usize, false);
             return true;
@@ -1747,7 +1971,7 @@ impl App {
             // 接受补全的这一层，接着可以输下一层
             self.path.set(&full);
         } else if is(VK_TAB) {
-            self.set_tab((self.tab + if shift { 2 } else { 1 }) % 3);
+            self.set_tab((self.tab + if shift { 3 } else { 1 }) % 4);
         } else if row == Some(SRow::Add) {
             if is(VK_RETURN) {
                 let path = self.path.string();
@@ -1774,6 +1998,8 @@ impl App {
             self.adjust(if is(VK_RIGHT) { 1 } else { -1 });
         } else if is(VK_SPACE) || is(VK_RETURN) {
             self.activate();
+        } else if (is(VK_DELETE) || is(VK_BACK)) && matches!(row, Some(SRow::BlockedItem(_))) {
+            if let Some(SRow::BlockedItem(i)) = row { self.remove_exclusion(i); }
         } else if (is(VK_DELETE) || is(VK_BACK))
             && let Some(SRow::Folder(i)) = row
         {
@@ -1845,6 +2071,7 @@ impl App {
         let kind = match self.edge(x, y) {
             Some(k) => Some(k),
             None if act == Act::Slider => Some(DragKind::Slider),
+            None if act == Act::HoldSlider => Some(DragKind::HoldSlider),
             None => None,
         };
         let mut start = POINT::default();
@@ -1855,9 +2082,8 @@ impl App {
             SetCapture(self.hwnd);
         }
         self.drag = Some(Drag { kind, act, start, win, width: self.cfg.width, scale: self.cfg.scale });
-        if kind == Some(DragKind::Slider) {
-            self.slide(x);
-        }
+        if kind == Some(DragKind::Slider) { self.slide(x); }
+        if kind == Some(DragKind::HoldSlider) { self.slide_hold(x); }
     }
 
     /// 滑块跟手：拖动时只更新读数，松手才真正缩放，避免滑块在指针下移动。
@@ -1869,6 +2095,18 @@ impl App {
         }
     }
 
+    fn set_hold(&mut self, ms: u32) {
+        self.cfg.hold_ms = ms.clamp(config::HOLD_MIN, config::HOLD_MAX);
+        self.hold_draft = None;
+        self.changed();
+        self.register_hotkey();
+    }
+    fn slide_hold(&mut self, x: f32) {
+        if let Some(h) = self.hots.iter().find(|h| h.act == Act::HoldSlider) {
+            let t = ((x - h.x - 9.0) / (h.w - 18.0)).clamp(0.0, 1.0);
+            self.hold_draft = Some(config::HOLD_MIN + ((t * (config::HOLD_MAX - config::HOLD_MIN) as f32 / 50.0).round() * 50.0) as u32);
+        }
+    }
     fn mouse_move(&mut self, x: f32, y: f32) {
         let mut now = POINT::default();
         unsafe {
@@ -1899,6 +2137,7 @@ impl App {
         let w_px = (win.right - win.left) as f32;
         match kind {
             Some(DragKind::Move) => {
+                self.pointer_anchor = None;
                 let mut cx = win.left as f32 + dx + w_px / 2.0 - self.work.left as f32;
                 // 靠近屏幕中线时吸附
                 if (cx - sw / 2.0).abs() < 14.0 * k {
@@ -1921,6 +2160,7 @@ impl App {
                 self.cfg.scale = (s.round() as u32).clamp(config::SCALE_MIN, config::SCALE_MAX);
             }
             Some(DragKind::Slider) => self.slide(x),
+            Some(DragKind::HoldSlider) => self.slide_hold(x),
             None => {}
         }
     }
@@ -1931,6 +2171,7 @@ impl App {
         }
         let Some(d) = self.drag.take() else { return };
         match d.kind {
+            Some(DragKind::HoldSlider) => { if let Some(v) = self.hold_draft { self.set_hold(v); } }
             Some(DragKind::Slider) => {
                 if let Some(v) = self.scale_draft {
                     self.set_scale(v);
@@ -1952,7 +2193,9 @@ impl App {
     fn click(&mut self, act: Act, x: f32) {
         self.caret_on = true;
         match act {
-            Act::None | Act::Bar | Act::Slider => {}
+            Act::None | Act::Bar | Act::Slider | Act::HoldSlider => {}
+            Act::RemoveBlocked(i) => self.remove_exclusion(i),
+            Act::BlockApp(i) => self.choose_running_app(i),
             Act::QueryField => {
                 if let Some(g) = &mut self.gfx {
                     let at = g.field_hit(&self.query, x);
@@ -1960,6 +2203,7 @@ impl App {
                 }
             }
             Act::Row(i) => self.launch(i, false),
+            Act::PinPage(step) => self.change_pin_page(step),
             Act::OpenSettings => self.open_settings(),
             Act::Back => self.close_settings(),
             Act::Tab(i) => self.set_tab(i),
@@ -1994,10 +2238,14 @@ impl App {
                 uID: 1,
                 uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                 uCallbackMessage: WM_TRAY,
-                hIcon: self.tray_icon,
+                hIcon: if self.wake_paused || !self.wake_status().excluded.is_empty() { self.paused_icon } else { self.tray_icon },
                 ..Default::default()
             };
-            for (dst, src) in data.szTip.iter_mut().zip("frun".encode_utf16()) {
+            let state = self.wake_status();
+            let tip = if self.wake_paused { format!("frun · {}", self.s.wake_paused) }
+                else if !state.excluded.is_empty() { format!("frun · {}: {}", self.s.wake_auto_paused, state.excluded) }
+                else { "frun".to_string() };
+            for (dst, src) in data.szTip.iter_mut().take(127).zip(tip.encode_utf16()) {
                 *dst = src;
             }
             let _ = Shell_NotifyIconW(action, &data);
@@ -2016,7 +2264,23 @@ impl App {
         }
         let point = || ((lp.0 as i16) as f32 / k, ((lp.0 >> 16) as i16) as f32 / k);
         match msg {
-            WM_HOTKEY => self.toggle(),
+            mouse::WM_WAKE_KEY => {
+                if self.wake_allowed() { self.toggle(); }
+            }
+            mouse::WM_MIDDLE_CLICK => {
+                if self.cfg.middle_mouse && self.wake_allowed() {
+                    if self.menu.is_open() { self.close_menu(false); }
+                    if self.visible { self.hide(); } else {
+                        self.show_at(Some(POINT { x: wp.0 as u32 as i32, y: lp.0 as i32 }));
+                    }
+                }
+            }
+            mouse::WM_WAKE_STATUS => {
+                self.tray(NIM_MODIFY);
+                if !self.wake_status().hotkey_ok { self.hotkey_note = Some(Instant::now()); }
+                if !self.wake_status().excluded.is_empty() && self.visible { self.close_menu(false); self.hide(); }
+                self.invalidate();
+            }
             WM_SUMMON => self.show(),
             WM_TRAY => match lp.0 as u32 & 0xFFFF {
                 WM_LBUTTONUP => self.toggle(),
@@ -2075,6 +2339,7 @@ impl App {
                     return None;
                 }
                 let handled = self.key(wp.0 as u32, lp.0 & (1 << 30) != 0);
+                if self.mode == Mode::Settings { self.ensure_settings_visible(); }
                 self.invalidate();
                 if !handled {
                     return None;
@@ -2100,7 +2365,7 @@ impl App {
                     (_, Some(SRow::Ext)) => &self.ext,
                     _ => &self.path,
                 };
-                let y = if self.mode == Mode::Search { 40.0 } else { BAR + (self.set_sel as f32 + 0.8) * ROW };
+                let y = if self.mode == Mode::Search { 40.0 } else { BAR + (self.set_sel.saturating_sub(self.settings_start()) as f32 + 0.8) * ROW };
                 ime_follow(self.hwnd, (tf.caret_x * k) as i32, (y * k) as i32);
                 return None;
             }
@@ -2132,11 +2397,21 @@ impl App {
             WM_CAPTURECHANGED => {
                 if self.drag.take().is_some() {
                     self.scale_draft = None;
+                    self.hold_draft = None;
                     self.changed();
                 }
             }
             WM_MOUSEWHEEL if self.mode == Mode::Search => {
-                self.move_sel(if (wp.0 >> 16) as i16 > 0 { -1 } else { 1 }, false);
+                let step = if (wp.0 >> 16) as i16 > 0 { -1 } else { 1 };
+                if self.pin_grid() { self.change_pin_page(step); } else { self.move_sel(step, false); }
+                self.invalidate();
+            }
+            WM_MOUSEWHEEL if self.mode == Mode::Settings => {
+                let step = if (wp.0 >> 16) as i16 > 0 { -1 } else { 1 };
+                let max = self.srows().len().saturating_sub(self.settings_capacity());
+                self.settings_offset = (self.settings_start() as i32 + step).clamp(0, max as i32) as usize;
+                self.set_sel = self.set_sel.clamp(self.settings_offset, (self.settings_offset + self.settings_capacity() - 1).min(self.srows().len() - 1));
+                self.cancel_recording();
                 self.invalidate();
             }
             WM_SETCURSOR if lp.0 as u32 & 0xFFFF == HTCLIENT => unsafe {
@@ -2200,7 +2475,7 @@ impl App {
             WM_PICKED => {
                 self.pinned = false;
                 if let Some(path) = unsafe { *Box::from_raw(lp.0 as *mut Option<String>) } {
-                    self.add_dir(&path);
+                    if wp.0 == 1 { self.add_exclusion(&path); } else { self.add_dir(&path); }
                 }
                 unsafe {
                     let _ = SetForegroundWindow(self.hwnd);
