@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read [CONTRIBUTING.md](https://github.com/Nongfsq/frun/blob/main/CONTRIBUTING.md) first.
+        Read [CONTRIBUTING.md](https://github.com/elias-chen/frun/blob/main/CONTRIBUTING.md) first.
         frun opens programs and nothing else, with as few steps and words as possible, and stays small. Suggestions that work against that are closed.
   - type: textarea
     id: problem

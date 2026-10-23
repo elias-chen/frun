@@ -4,7 +4,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Read [CONTRIBUTING.md](https://github.com/Nongfsq/frun/blob/main/CONTRIBUTING.md) first.
+        Read [CONTRIBUTING.md](https://github.com/elias-chen/frun/blob/main/CONTRIBUTING.md) first.
         An issue without the output of `frun --doctor` is closed without a reply.
   - type: textarea
     id: what
