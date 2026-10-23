@@ -5,84 +5,149 @@
 <h1 align="center">frun</h1>
 
 <p align="center">
-  <b>长按中键呼出，松开，再左键选择软件。</b><br>
-  支持固定软件、拼音搜索和已有窗口唤醒的 Windows 启动器。
+  <b>Alt + Space，打几个字母，回车。</b><br>
+  Windows 上一个小而安静的程序启动器。
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="https://github.com/elias-chen/frun/releases/latest">下载</a> ·
-  <a href="docs/usage.md">使用说明</a> ·
-  <a href="CHANGELOG.md">更新日志</a> ·
+  <a href="README.md">English</a>
+  &nbsp;·&nbsp;
+  <a href="#按键">按键</a>
+  &nbsp;·&nbsp;
+  <a href="#下载">下载</a>
+  &nbsp;·&nbsp;
+  <a href="docs/usage.md">使用说明</a>
+  &nbsp;·&nbsp;
+  <a href="CHANGELOG.md">更新日志</a>
+  &nbsp;·&nbsp;
   <a href="LICENSE">MIT 许可</a>
 </p>
 
-这是 [elias-chen/frun](https://github.com/elias-chen/frun)，基于 [Nongfsq/frun](https://github.com/Nongfsq/frun) 改造的分支。在原有程序搜索、拼音匹配、路径补全和原生 Windows 界面的基础上，增加鼠标启动面板，无需会员订阅。
+<p align="center">
+  <img src="docs/media/demo.zh-CN.gif" width="92%" alt="打 wx，回车，微信就开了">
+</p>
 
-## 0.3.0 新增功能
+frun 只找程序，别的都不管。装在哪里的程序都能找到：开始菜单里的，Microsoft Store 的，还有你放在 `D:\Tools` 这种文件夹里、从没进过开始菜单的小工具。你的文档不会混进来。
 
-- **在鼠标处呼出。** 默认长按中键 400 毫秒显示面板，松开后面板保留，再用左键点击软件。搜索框靠近触发位置，屏幕边缘自动向工作区内调整，支持多显示器与 DPI 缩放。
-- **长按时长可调。** 设置 → 唤醒中提供 200～1000 毫秒滑块，步长 50 毫秒。短按补发原始点击；达到阈值前移动超过 8 个屏幕像素，会交还中键拖动。
-- **固定常用软件。** 搜索后右键或 Ctrl+P 固定到首页。空搜索框显示四列图标，输入即回到搜索；固定目标和顺序重启后保留。
-- **优先唤醒已有窗口。** 普通启动先尝试恢复并切换到已有窗口，多窗口时优先最近使用的窗口。带参数快捷方式、管理员启动保留原有行为；右键“新开实例”可跳过窗口复用。
-- **暂停与应用排除。** 在设置或托盘暂停唤醒，同时释放中键和全局快捷键。将游戏等程序加入禁用名单后，仅在它处于前台时自动暂停，切出后恢复。
+## 能做什么
 
-手动暂停只对本次运行有效，退出重开后恢复；长按时长和禁用名单会保存。短按补发、特殊输入和窗口切换受 Windows 权限与应用行为影响，详见[使用说明](docs/usage.md)。
+### 打名字，或者拼音首字母
 
-## 下载与运行
+`wx` 就是微信，`vsc` 就是 Visual Studio Code。回车打开第一行，Alt + 数字打开第几行。
 
-支持 **Windows 10 / 11，x64**。请从[本分支的 Releases](https://github.com/elias-chen/frun/releases/latest) 下载：
+软件已经打开时，优先切换到已有窗口，最小化的先恢复；没有可用窗口时，再正常启动。
 
-| 文件 | 用途 |
+### 常用的软件，固定在手边
+
+搜索后右键选择“固定到首页”，或者按 Ctrl + P。清空搜索框，常用软件就以四列图标显示；继续打字，还是原来的搜索。固定的软件和顺序会记住，重开也在。
+
+长按鼠标中键，面板出现在鼠标附近；松开中键，再用左键选择软件。默认长按 400 毫秒，可以在 设置 → 唤醒 中调整时长，或关闭鼠标唤醒。
+
+### 一个程序只占一行
+
+一个程序目录里常常有十几个 exe：主程序、更新器、崩溃上报、各种辅助工具。frun 只把程序列一次，其余的收在它后面，按 → 才展开。
+
+<p align="center">
+  <img src="docs/media/one-row.zh-CN.jpg" width="80%" alt="VirtualBox 只出一行，按 → 列出同目录的其他程序">
+</p>
+
+### 路径也能直接去
+
+打 `d:\so`，Tab 补全，接着打，回车，文件夹就在资源管理器里打开了。
+
+<p align="center">
+  <img src="docs/media/path.jpg" width="80%" alt="输入路径，Tab 补全">
+</p>
+
+### 其余的在右键里
+
+以管理员身份打开、打开所在文件夹、不再显示某个程序（Ctrl + Z 撤销）、不再查某个文件夹。想跳过已有窗口唤醒，可以选择“新开实例”。
+
+<p align="center">
+  <img src="docs/media/menu.zh-CN.jpg" width="80%" alt="右键菜单">
+</p>
+
+### 深色和浅色
+
+跟着 Windows 走，也可以自己选。有多块屏幕时，它出现在鼠标所在的那一块。
+
+<p align="center">
+  <img src="docs/media/light.zh-CN.jpg" width="80%" alt="浅色主题下的设置">
+</p>
+
+### 想要的话，一律以管理员身份打开
+
+在 设置 → 通用 里打开"以管理员身份打开"，之后从 frun 启动的程序都以管理员运行。Windows 照样每次弹窗确认，这是应该的。frun 自己从不要管理员权限。Microsoft Store 的应用不受影响，因为 Windows 不允许它们这样提权运行。
+
+<p align="center">
+  <img src="docs/media/admin-switch.zh-CN.jpg" width="49%" alt="以管理员身份打开的开关">
+  <img src="docs/media/admin-run.zh-CN.jpg" width="49%" alt="从 frun 打开的 Windows PowerShell，以管理员身份运行">
+</p>
+
+### 不用设置
+
+第一次运行时，frun 读 Windows 自己的安装记录，找出你的程序装在哪些文件夹，自己加进来。以后装了新程序，也会自己出现。
+
+### 需要的时候，暂停一下
+
+在设置或托盘菜单里暂停唤醒，中键和全局快捷键就会交还给其他软件。也可以把游戏等应用加入禁用名单：它在前台时自动暂停，切出后恢复。
+
+手动暂停会保持到你恢复唤醒或重启 frun。详细设置和不同软件下的使用说明，见[使用指南](docs/usage.md)。
+
+## 按键
+
+| 按键 | 作用 |
 | --- | --- |
-| frun-v0.3.0-windows-x64.zip | 便携包，含程序、使用说明与许可证 |
-| frun.exe | 单文件运行，或手动替换旧版本 |
-| frun.exe.sha256 | SHA-256 校验文件，供自动更新使用 |
+| Alt + Space | 呼出或收起（设置 → 唤醒 里可以改） |
+| 长按鼠标中键 | 在鼠标附近呼出或收起；呼出后松开保持显示 |
+| 回车 / 左键点击 | 打开软件，符合条件时唤醒已有窗口 |
+| Ctrl + P | 固定或取消固定选中的软件 |
+| PageUp / PageDown / 滚轮 | 固定软件网格翻页 |
+| Alt + 1 … 8 | 打开第几行 |
+| → | 展开程序目录里的其他 exe（← 收起）；路径模式下接受补全 |
+| Tab | 路径模式下接受补全；平时移到下一行 |
+| Ctrl + Shift + 回车 | 以管理员身份打开 |
+| Ctrl + 回车 | 打开所在文件夹 |
+| Ctrl + Delete | 不再显示这个程序；Ctrl + Z 撤销 |
+| Ctrl + , | 设置 |
+| Esc | 返回，或收起 |
 
-解压便携包后运行 frun.exe 即可。替换旧版本前，先在托盘右键退出旧进程。本分支与原版共用配置、缓存和单实例标识，切换版本前可备份配置。若 Quicker 同时占用中键，请先关闭它的中键唤醒或退出 Quicker。
+## 小，是有意的
 
-可在设置中开启开机自启。自动更新检查 **elias-chen/frun** 的发布版本，用 SHA-256 核对后，在面板收起时替换程序。原版仍检查原仓库，首次切换到本分支需要手动下载。
+一个 2 MB 左右的 exe，用 Rust 写成。不用安装，不带运行库，不用网页渲染。
 
-## 操作
+下图是上游作者对原版的实测，索引了 1,603 个程序。本分支尚未重新进行性能测量。
 
-| 操作 | 作用 |
-| --- | --- |
-| 长按鼠标中键 | 在鼠标位置呼出或收起；松开后保留面板 |
-| Alt+Space | 呼出或收起，可在设置 → 唤醒修改 |
-| 左键 / Enter | 打开软件，符合条件时复用已有窗口 |
-| Ctrl+P / 右键菜单 | 固定或取消固定 |
-| PageUp / PageDown / 滚轮 | 固定软件翻页 |
-| Alt+1 … 8 | 打开对应搜索结果 |
-| → / ← | 展开或收起程序目录中的其他 exe |
-| Tab | 路径补全，或移到下一项 |
-| Ctrl+Shift+Enter | 以管理员身份打开 |
-| Ctrl+Enter | 打开所在文件夹 |
-| Ctrl+Delete / Ctrl+Z | 隐藏软件 / 撤销 |
-| Ctrl+, | 设置 |
-| Esc | 返回或收起 |
+<p align="center">
+  <img src="docs/media/stats.zh-CN.png" width="100%" alt="收起后内存 0.4 MB，每次按键检索 0.25 ms，99.4% 的文件夹直接跳过，整个程序 2 MB">
+</p>
 
-保留开始菜单、Microsoft Store 应用和程序目录索引，支持中文、拼音首字母和路径补全。没有固定软件时，空搜索框继续显示原有常用软件列表；主题可跟随系统或手动选择。
+## 下载
 
-## 配置与数据
+在 [Releases](https://github.com/elias-chen/frun/releases/latest) 下载 `frun.exe`，放在任意位置运行就行，需要 Windows 10 或 11，x64。也可以下载便携 ZIP，里面附有使用说明和许可证。
 
-设置和使用次数位于 `%APPDATA%\frun`，索引和图标缓存位于 `%LOCALAPPDATA%\frun`。自动更新可在设置中关闭。禁用应用按 exe 文件名精确匹配、忽略大小写，名单保存在本地。
+想开机就有，在设置里打开“开机自启”。新版本会自己来：frun 检查本分支的发布版本，在后台下载，用发布时附上的 SHA-256 核对，下次收起时换上。
 
-遇到索引问题，可运行 `frun --doctor` 或 `frun --doctor "C:\path\to\program.exe"`。报告包含本机路径，提交 issue 前请检查。反馈和开发说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+从原版切换时，首次需要手动下载，并先从托盘退出旧程序。两者共用配置和缓存，切换前可以备份 `%APPDATA%\frun`。各版本改动见[更新日志](CHANGELOG.md)。
 
-卸载时，关闭开机自启，从托盘退出，再删除程序和上述两个数据目录。
+exe 目前还没有代码签名，第一次运行时 Windows SmartScreen 可能提示"Windows 已保护你的电脑"。点"更多信息"，再点"仍要运行"。
 
-## 自行构建与发布
-
-在 Windows 安装稳定版 [Rust](https://rustup.rs)，然后运行：
+想自己构建，在 Windows 装好稳定版 [Rust](https://rustup.rs) 后运行：
 
 ```powershell
-cargo check --locked --tests
-cargo test --locked
 cargo build --release --locked
 ```
 
-产物为 `target/release/frun.exe`。PR 会执行 Windows 检查、测试和构建；正式发布会在测试和构建通过后打包许可证，回读并核对上传资产，最后公开 Release。版本更新流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+不想用了：在设置里关掉"开机自启"，从托盘图标退出，再删掉 `frun.exe` 以及 `%APPDATA%\frun`、`%LOCALAPPDATA%\frun` 两个文件夹。
 
-## 来源与许可
+## 你的数据
 
-原始项目为 [Nongfsq/frun](https://github.com/Nongfsq/frun)，本分支增加鼠标交互、固定软件、暂停、应用排除和窗口复用。代码采用 [MIT](LICENSE)，保留原作者版权声明。界面使用更纱黑体子集，遵循 SIL Open Font License 1.1，见[字体说明](assets/FONT-NOTICE.md)和[字体许可证](assets/FONT-LICENSE.txt)。
+设置和使用次数存在 `%APPDATA%\frun`；索引和图标缓存存在 `%LOCALAPPDATA%\frun`，随时可以删。搜索内容、设置和使用次数留在本机。联网仅用于每天最多一次的版本检查和更新下载，可以在设置里关闭自动更新。
+
+如果 frun 漏了某个程序，或者显示了不该显示的，运行 `frun --doctor`。它会把报告写到 `%LOCALAPPDATA%\frun\doctor.txt` 并打开。报告里有你电脑上的文件夹和程序路径，附到 issue 之前请先看一遍。问题反馈和参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)（英文）。
+
+## 许可
+
+本项目基于 [Nongfsq/frun](https://github.com/Nongfsq/frun)。演示和界面截图沿用上游素材，部分设置与本分支当前界面有所不同。
+
+MIT，见 [LICENSE](LICENSE)。界面字体是更纱黑体的子集，使用 SIL Open Font License 1.1，见 [assets/FONT-NOTICE.md](assets/FONT-NOTICE.md)。 "小，是有意的"一节图中的 Rust logo 版权归 Rust Foundation，依 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 使用，改为白色；frun 与 Rust 项目无隶属关系。
