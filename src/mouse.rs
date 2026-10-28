@@ -81,14 +81,14 @@ impl ClickWatch {
         let next = (old.wrapping_add(2) & !1) | usize::from(active);
         self.0.store(next, Ordering::Release);
     }
-    fn outside(&self, point: POINT, bounds: RECT) -> Option<usize> {
-        let generation = self.0.load(Ordering::Acquire);
+    fn outside(&self, generation: usize, point: POINT, bounds: RECT) -> Option<usize> {
         let outside = point.x < bounds.left || point.x >= bounds.right
             || point.y < bounds.top || point.y >= bounds.bottom;
-        (generation & 1 != 0 && outside).then_some(generation)
+        (outside && self.current(generation)).then_some(generation)
     }
-    fn active(&self) -> bool {
-        self.0.load(Ordering::Acquire) & 1 != 0
+    fn snapshot(&self) -> Option<usize> {
+        let generation = self.0.load(Ordering::Acquire);
+        (generation & 1 != 0).then_some(generation)
     }
     fn current(&self, generation: usize) -> bool {
         generation & 1 != 0 && self.0.load(Ordering::Acquire) == generation
@@ -381,10 +381,10 @@ unsafe extern "system" fn foreground_proc(
 }
 
 fn notify_outside_click(hwnd: HWND, watch: &ClickWatch, point: POINT) {
-    if !watch.active() { return; }
+    let Some(generation) = watch.snapshot() else { return };
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
-        if let Some(generation) = watch.outside(point, rect) {
+        if let Some(generation) = watch.outside(generation, point, rect) {
             unsafe {
                 let _ = PostMessageW(Some(hwnd), WM_OUTSIDE_CLICK, WPARAM(generation), LPARAM(0));
             }
@@ -515,17 +515,20 @@ mod tests {
         let rect = RECT { left: -900, top: 100, right: -500, bottom: 400 };
         let inside = POINT { x: -700, y: 200 };
         let outside = POINT { x: -500, y: 200 };
-        assert!(watch.outside(outside, rect).is_none());
+        assert!(watch.snapshot().is_none());
         watch.set(true);
-        assert!(watch.outside(inside, rect).is_none());
-        assert!(watch.outside(POINT { x: -900, y: 100 }, rect).is_none());
-        let first = watch.outside(outside, rect).unwrap();
+        let first = watch.snapshot().unwrap();
+        assert!(watch.outside(first, inside, rect).is_none());
+        assert!(watch.outside(first, POINT { x: -900, y: 100 }, rect).is_none());
+        assert_eq!(watch.outside(first, outside, rect), Some(first));
         assert!(watch.current(first));
         watch.set(false);
         assert!(!watch.current(first));
-        assert!(watch.outside(outside, rect).is_none());
+        assert!(watch.snapshot().is_none());
         watch.set(true);
-        let next = watch.outside(POINT { x: -700, y: 400 }, rect).unwrap();
+        let next = watch.snapshot().unwrap();
+        assert!(watch.outside(first, outside, rect).is_none());
+        assert_eq!(watch.outside(next, POINT { x: -700, y: 400 }, rect), Some(next));
         assert_ne!(first, next);
         assert!(!watch.current(first));
         assert!(watch.current(next));
