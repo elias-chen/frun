@@ -664,6 +664,7 @@ impl App {
         self.visible = true;
         self.wake_gfx();
         self.place(true);
+        if let Some(mouse) = &self.mouse { mouse.watch_clicks(true); }
         unsafe {
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
@@ -692,6 +693,7 @@ impl App {
             return;
         }
         self.visible = false;
+        if let Some(mouse) = &self.mouse { mouse.watch_clicks(false); }
         self.drop_missing();
         self.cancel_recording();
         self.drag = None;
@@ -2280,6 +2282,14 @@ impl App {
                 if !self.wake_status().hotkey_ok { self.hotkey_note = Some(Instant::now()); }
                 if !self.wake_status().excluded.is_empty() && self.visible { self.close_menu(false); self.hide(); }
                 self.invalidate();
+            }
+            // The panel may be shown without becoming the foreground window, so
+            // WM_ACTIVATE alone cannot detect the first click in another app.
+            mouse::WM_OUTSIDE_CLICK => {
+                let current = self.mouse.as_ref().is_some_and(|m| m.current_click(wp.0));
+                if current && self.visible && self.mode == Mode::Search && !self.pinned && !self.menu.on_row() {
+                    self.hide();
+                }
             }
             WM_SUMMON => self.show(),
             WM_TRAY => match lp.0 as u32 & 0xFFFF {
