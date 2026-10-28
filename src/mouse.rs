@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{
     cell::RefCell,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}, mpsc},
     time::{Duration, Instant},
 };
 use windows::{
@@ -25,6 +25,7 @@ pub const WM_MIDDLE_CLICK: u32 = WM_APP + 13;
 pub const WM_WAKE_KEY: u32 = WM_APP + 14;
 pub const WM_WAKE_STATUS: u32 = WM_APP + 15;
 const WM_CONFIG: u32 = WM_APP + 16;
+pub const WM_OUTSIDE_CLICK: u32 = WM_APP + 17;
 const HOTKEY: i32 = 1;
 
 #[derive(Clone, Default)]
@@ -67,12 +68,38 @@ pub struct MiddleMouse {
     thread: u32,
     requests: mpsc::Sender<Request>,
     status: Arc<Mutex<Status>>,
+    click_watch: Arc<ClickWatch>,
+}
+
+/// A generation guards against clicks queued before a hide and subsequent show.
+/// The low bit indicates that a visible panel is being watched.
+#[derive(Default)]
+struct ClickWatch(AtomicUsize);
+impl ClickWatch {
+    fn set(&self, active: bool) {
+        let old = self.0.load(Ordering::Relaxed);
+        let next = (old.wrapping_add(2) & !1) | usize::from(active);
+        self.0.store(next, Ordering::Release);
+    }
+    fn outside(&self, generation: usize, point: POINT, bounds: RECT) -> Option<usize> {
+        let outside = point.x < bounds.left || point.x >= bounds.right
+            || point.y < bounds.top || point.y >= bounds.bottom;
+        (outside && self.current(generation)).then_some(generation)
+    }
+    fn snapshot(&self) -> Option<usize> {
+        let generation = self.0.load(Ordering::Acquire);
+        (generation & 1 != 0).then_some(generation)
+    }
+    fn current(&self, generation: usize) -> bool {
+        generation & 1 != 0 && self.0.load(Ordering::Acquire) == generation
+    }
 }
 
 struct State {
     target: isize,
     settings: Settings,
     status: Arc<Mutex<Status>>,
+    click_watch: Arc<ClickWatch>,
     hold: Hold,
     press_window: isize,
     foreground: isize,
@@ -89,6 +116,8 @@ impl MiddleMouse {
         let target = hwnd.0 as isize;
         let status = Arc::new(Mutex::new(Status::default()));
         let shared = status.clone();
+        let click_watch = Arc::new(ClickWatch::default());
+        let watched = click_watch.clone();
         let (requests, rx) = mpsc::channel::<Request>();
         let (ready, started) = mpsc::sync_channel(1);
         std::thread::spawn(move || unsafe {
@@ -104,6 +133,7 @@ impl MiddleMouse {
                     target,
                     settings,
                     status: shared,
+                    click_watch: watched,
                     hold: Hold::default(),
                     press_window: 0,
                     foreground: 0,
@@ -190,6 +220,7 @@ impl MiddleMouse {
             thread,
             requests,
             status,
+            click_watch,
         })
     }
     pub fn configure(&self, settings: Settings) -> bool {
@@ -206,6 +237,12 @@ impl MiddleMouse {
     }
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+    pub fn watch_clicks(&self, active: bool) {
+        self.click_watch.set(active);
+    }
+    pub fn current_click(&self, generation: usize) -> bool {
+        self.click_watch.current(generation)
     }
 }
 impl Drop for MiddleMouse {
@@ -342,7 +379,27 @@ unsafe extern "system" fn foreground_proc(
 ) {
     with_state(|s| s.refresh());
 }
+
+fn notify_outside_click(hwnd: HWND, watch: &ClickWatch, point: POINT) {
+    let Some(generation) = watch.snapshot() else { return };
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+        if let Some(generation) = watch.outside(generation, point, rect) {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), WM_OUTSIDE_CLICK, WPARAM(generation), LPARAM(0));
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 && matches!(wp.0 as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        let data = unsafe { &*(lp.0 as *const MSLLHOOKSTRUCT) };
+        with_state(|s| {
+            // This is observation only: the original click always continues to its target.
+            notify_outside_click(HWND(s.target as _), &s.click_watch, data.pt);
+        });
+    }
     if code == HC_ACTION as i32
         && matches!(wp.0 as u32, WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MOUSEMOVE)
     {
@@ -452,6 +509,58 @@ fn replay(origin: Point, release: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn outside_clicks_only_apply_to_the_visible_panel_generation() {
+        let watch = ClickWatch::default();
+        let rect = RECT { left: -900, top: 100, right: -500, bottom: 400 };
+        let inside = POINT { x: -700, y: 200 };
+        let outside = POINT { x: -500, y: 200 };
+        assert!(watch.snapshot().is_none());
+        watch.set(true);
+        let first = watch.snapshot().unwrap();
+        assert!(watch.outside(first, inside, rect).is_none());
+        assert!(watch.outside(first, POINT { x: -900, y: 100 }, rect).is_none());
+        assert_eq!(watch.outside(first, outside, rect), Some(first));
+        assert!(watch.current(first));
+        watch.set(false);
+        assert!(!watch.current(first));
+        assert!(watch.snapshot().is_none());
+        watch.set(true);
+        let next = watch.snapshot().unwrap();
+        assert!(watch.outside(first, outside, rect).is_none());
+        assert_eq!(watch.outside(next, POINT { x: -700, y: 400 }, rect), Some(next));
+        assert_ne!(first, next);
+        assert!(!watch.current(first));
+        assert!(watch.current(next));
+    }
+    #[test]
+    fn outside_click_is_posted_to_a_window_without_requiring_foreground_activation() {
+        unsafe {
+            // A hidden window cannot be foreground; a real Win32 message queue
+            // exercises the same notification used by the low-level hook.
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!(""),
+                WS_POPUP, 100, 100, 200, 150, None, None, None, None,
+            ).unwrap();
+            let watch = ClickWatch::default();
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).unwrap();
+            let inside = POINT { x: rect.left, y: rect.top };
+            let outside = POINT { x: rect.right, y: rect.bottom };
+            let mut msg = MSG::default();
+            notify_outside_click(hwnd, &watch, outside);
+            assert!(!PeekMessageW(&mut msg, Some(hwnd), WM_OUTSIDE_CLICK, WM_OUTSIDE_CLICK, PM_REMOVE).as_bool());
+            watch.set(true);
+            notify_outside_click(hwnd, &watch, inside);
+            assert!(!PeekMessageW(&mut msg, Some(hwnd), WM_OUTSIDE_CLICK, WM_OUTSIDE_CLICK, PM_REMOVE).as_bool());
+            notify_outside_click(hwnd, &watch, outside);
+            assert!(PeekMessageW(&mut msg, Some(hwnd), WM_OUTSIDE_CLICK, WM_OUTSIDE_CLICK, PM_REMOVE).as_bool());
+            assert!(watch.current(msg.wParam.0));
+            watch.set(false);
+            assert!(!watch.current(msg.wParam.0));
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
     #[test]
     fn manual_pause_has_priority_over_foreground_changes() {
         let cfg = config::Config {

@@ -1,5 +1,12 @@
 # 更新日志 / Changelog
 
+## 0.3.1 — 2026-10-28
+
+- 修复中键长按呼出后，未点击启动器便直接点击其他窗口时，面板可能不会收起的问题。面板外点击会继续传递给原来的目标。
+- 避免上一次面板的延迟点击消息影响下一次呼出；保留设置和右键菜单的原有行为。
+
+Fix dismissal after middle-button wake when the launcher has not received foreground focus. Outside clicks continue to their target.
+
 ## 0.3.0 — 2026-10-23
 
 本分支首个正式发布版，基于上游 0.2.1。完整说明见 [v0.3.0 发布说明](docs/releases/v0.3.0.md)。
